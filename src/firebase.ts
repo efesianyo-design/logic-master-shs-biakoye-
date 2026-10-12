@@ -1,5 +1,12 @@
 import { initializeApp } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from 'firebase/auth';
+import {
+  getAuth,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut,
+  onAuthStateChanged,
+  signInAnonymously
+} from 'firebase/auth';
 import {
   getFirestore,
   doc,
@@ -22,6 +29,20 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 // Auth instance
 export const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
+
+/**
+ * Ensures the user is authenticated (at least anonymously) to satisfy Firestore rules.
+ */
+export async function ensureAuth() {
+  if (auth.currentUser) return auth.currentUser;
+  try {
+    const result = await signInAnonymously(auth);
+    return result.user;
+  } catch (error) {
+    console.error('Anonymous auth error:', error);
+    return null;
+  }
+}
 
 export async function signInWithGoogle() {
   try {

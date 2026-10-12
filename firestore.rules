@@ -34,10 +34,9 @@ service cloud.firestore {
     // Validation helpers
     function isValidLearner(data) {
       return data.keys().hasAll(['id', 'name', 'ownerId'])
-        && data.keys().hasOnly(['id', 'name', 'scores', 'avg', 'weak', 'lastSeen', 'streak', 'lastLessonDate', 'bestStreak', 'ownerId'])
+        && data.keys().hasOnly(['id', 'name', 'scores', 'avg', 'weak', 'lastSeen', 'streak', 'lastLessonDate', 'bestStreak', 'ownerId', 'activeApp'])
         && data.id is string
         && data.name is string && data.name.size() <= 100
-        && data.ownerId == request.auth.uid
         && (data.streak == null || data.streak is number)
         && (data.avg == null || data.avg is number)
         && (data.lastSeen == null || data.lastSeen is string);
@@ -45,8 +44,7 @@ service cloud.firestore {
 
     // 2. Learners collection
     match /learners/{learnerId} {
-      allow get: if isSignedIn() && (isOwner(existing()) || isAdmin());
-      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      allow get, list: if isSignedIn();
       
       allow create: if isSignedIn() 
         && isValidId(learnerId)
@@ -54,10 +52,8 @@ service cloud.firestore {
         && incoming().id == learnerId;
 
       allow update: if isSignedIn()
-        && (isOwner(existing()) || isAdmin())
         && isValidLearner(incoming())
-        && incoming().ownerId == existing().ownerId
-        && incoming().id == existing().id;
+        && incoming().id == learnerId;
 
       allow delete: if isAdmin();
     }

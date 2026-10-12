@@ -47,7 +47,8 @@ import {
   CloudLearnerRecord,
   signInWithGoogle,
   logout,
-  auth
+  auth,
+  ensureAuth
 } from './firebase';
 import { onAuthStateChanged, User } from 'firebase/auth';
 
@@ -2321,6 +2322,8 @@ export default function App() {
       setCloudLearners(records);
     });
 
+    // Ensure we have an anonymous session at minimum for Firestore rules
+    ensureAuth();
     testConnection();
 
     return () => {
@@ -2686,8 +2689,10 @@ export default function App() {
         };
         existing[matchIndex] = activeProfile;
       } else {
+        // Use name-based ID for cloud consolidation and better teacher visibility
+        const nameId = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '_');
         activeProfile = {
-          id: Date.now(),
+          id: nameId as any, // Store as string ID
           name: trimmed,
           scores: [],
           avg: 0,
@@ -4150,29 +4155,6 @@ export default function App() {
             >
               <span>CONTINUE</span>
               <ArrowRight className="w-5 h-5" />
-            </button>
-
-            <div className="relative my-6">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-slate-200"></div>
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-white px-2 text-slate-500 font-bold tracking-widest">CLOUD SYNC</span>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={async () => {
-                const u = await signInWithGoogle();
-                if (u) {
-                  setLoginNameInput(u.displayName || '');
-                }
-              }}
-              className="w-full h-14 bg-white hover:bg-slate-50 text-slate-700 border-2 border-slate-200 font-black rounded-xl shadow-sm active:scale-[0.98] transition flex items-center justify-center gap-3"
-            >
-              <Globe className="w-5 h-5 text-blue-500" />
-              <span>{user ? 'LINKED: ' + (user.displayName || 'ACCOUNT').toUpperCase() : 'SIGN IN WITH GOOGLE'}</span>
             </button>
 
             {allLearners.length > 0 && (
