@@ -14,13 +14,18 @@ const app = express();
 app.use(express.json());
 
 const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY as string,
+  apiKey: (process.env.GEMINI_API_KEY || "dummy_key") as string,
   httpOptions: {
     headers: {
       'User-Agent': 'aistudio-build',
     }
   }
 });
+
+if (!process.env.GEMINI_API_KEY) {
+  console.warn("WARNING: GEMINI_API_KEY is missing. AI features will fail.");
+}
+
 
 // AI Generation Routes
 app.post('/api/ai/generate-truefalse', async (req, res) => {

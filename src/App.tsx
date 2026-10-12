@@ -2329,6 +2329,24 @@ export default function App() {
     };
   }, []);
 
+  // Proactive Cloud Sync: Whenever the current learner's profile changes and they are signed in
+  useEffect(() => {
+    if (currentLearner) {
+      syncLearnerToCloud({
+        id: String(currentLearner.id),
+        name: currentLearner.name,
+        scores: currentLearner.scores,
+        avg: currentLearner.avg,
+        weak: currentLearner.weak,
+        lastSeen: currentLearner.lastSeen,
+        streak: currentLearner.streak,
+        lastLessonDate: currentLearner.lastLessonDate,
+        bestStreak: currentLearner.bestStreak,
+        activeApp: screen
+      });
+    }
+  }, [currentLearner, user]);
+
   // Create-Your-Own state (6 tabs)
   const [createActiveTab, setCreateActiveTab] = useState<'truefalse' | 'venn' | 'pattern' | 'decision' | 'argument' | 'fallacy'>('truefalse');
   const [createStatementInput, setCreateStatementInput] = useState('');
@@ -3661,22 +3679,22 @@ export default function App() {
     });
 
     return { topWeak, count: maxCount };
-  }, [allLearners]);
+  }, [consolidatedLearners]);
 
   const mistakeAnalysis = useMemo(() => {
-    const combined = [...historicalWrong, ...wrongAnswers];
+    let totalMistakes = 0;
     let allVsSomeCount = 0;
     let negationCount = 0;
-    const totalMistakes = combined.length;
 
-    combined.forEach((item) => {
-      const txt = item.text.toUpperCase();
-      if (txt.includes('ALL') || txt.includes('SOME') || item.conceptType === 'ALL' || item.conceptType === 'SOME') {
-        allVsSomeCount++;
-      }
-      if (txt.includes('NOT') || txt.includes('CANNOT') || txt.includes('NO ')) {
-        negationCount++;
-      }
+    consolidatedLearners.forEach(lr => {
+      (lr.scores || []).forEach((s: any) => {
+        totalMistakes += (s.total - s.score);
+      });
+      (lr.weak || []).forEach((w: string) => {
+        const up = w.toUpperCase();
+        if (up.includes('ALL') || up.includes('SOME')) allVsSomeCount++;
+        if (up.includes('NEGATIONS') || up.includes('NONE') || up.includes('NOT')) negationCount++;
+      });
     });
 
     return {
@@ -3685,7 +3703,7 @@ export default function App() {
       totalMistakes,
       recentCount: wrongAnswers.length
     };
-  }, [historicalWrong, wrongAnswers]);
+  }, [consolidatedLearners, wrongAnswers]);
 
   // Export CSV with columns for all 6 lessons + overall
   const handleExportCSV = () => {
@@ -3822,7 +3840,7 @@ export default function App() {
       totalAttempts: allDecScores.length,
       topOverlooked: `Learners ignore ${topOverlooked}`
     };
-  }, [allLearners, overlookedFactorsLog]);
+  }, [consolidatedLearners, overlookedFactorsLog]);
 
   // 5 Dots progress indicator
   const dotProgress = useMemo(() => {
