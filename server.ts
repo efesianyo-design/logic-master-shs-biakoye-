@@ -3,7 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from 'dotenv';
-import { createServer as createViteServer } from 'vite';
+// Remove top-level vite import
 
 dotenv.config();
 
@@ -272,21 +272,28 @@ app.post('/api/ai/generate-fallacies', async (req, res) => {
   }
 });
 
-// Vite middleware for dev mode
-if (process.env.NODE_ENV !== 'production') {
-  const vite = await createViteServer({
-    server: { middlewareMode: true },
-    appType: 'spa'
-  });
-  app.use(vite.middlewares);
-} else {
-  app.use(express.static(path.join(__dirname, 'dist')));
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+// Middleware and server start
+async function startServer() {
+  if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa'
+    });
+    app.use(vite.middlewares);
+  } else {
+    // In production, the server is bundled into dist/server.js
+    // so __dirname is the dist directory itself.
+    app.use(express.static(__dirname));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(__dirname, 'index.html'));
+    });
+  }
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
   });
 }
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+startServer();
