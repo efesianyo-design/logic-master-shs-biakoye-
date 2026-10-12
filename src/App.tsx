@@ -33,9 +33,23 @@ import {
   XCircle,
   Scale,
   SearchCheck,
-  Quote
+  Quote,
+  Layers,
+  Wand2,
+  Wifi,
+  Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import {
+  syncLearnerToCloud,
+  subscribeToClassroomLearners,
+  testConnection,
+  CloudLearnerRecord,
+  signInWithGoogle,
+  logout,
+  auth
+} from './firebase';
+import { onAuthStateChanged, User } from 'firebase/auth';
 
 // ============================================================================
 // TYPES & DATA STRUCTURES
@@ -153,6 +167,145 @@ interface LearnerProfile {
   avg: number;
   weak: string[];
   lastSeen: string;
+  streak?: number;
+  lastLessonDate?: string; // YYYY-MM-DD
+  bestStreak?: number;
+  activeApp?: string;
+  ownerId?: string;
+}
+
+// ----------------------------------------------------------------------------
+// DAILY STREAK HELPERS (Conforming to local calendar days)
+// ----------------------------------------------------------------------------
+function getLocalDateString(d: Date = new Date()): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getDaysDifference(dateStr1: string, dateStr2: string): number {
+  if (!dateStr1 || !dateStr2) return 999;
+  try {
+    const d1 = new Date(dateStr1 + 'T00:00:00');
+    const d2 = new Date(dateStr2 + 'T00:00:00');
+    const diffMs = d2.getTime() - d1.getTime();
+    return Math.round(diffMs / (1000 * 60 * 60 * 24));
+  } catch {
+    return 999;
+  }
+}
+
+function getEffectiveStreak(learner?: LearnerProfile | null): {
+  streak: number;
+  isActiveToday: boolean;
+  bestStreak: number;
+  isAtRisk: boolean;
+  daysSinceLastLesson: number;
+} {
+  if (!learner) {
+    return { streak: 0, isActiveToday: false, bestStreak: 0, isAtRisk: false, daysSinceLastLesson: -1 };
+  }
+
+  const todayStr = getLocalDateString();
+  let lastDate = learner.lastLessonDate;
+  let rawStreak = typeof learner.streak === 'number' ? learner.streak : 0;
+  let bestStreak = typeof learner.bestStreak === 'number' ? learner.bestStreak : rawStreak;
+
+  // Fallback: If lastLessonDate is missing but learner has recorded scores, extract last score date
+  if (!lastDate && learner.scores && learner.scores.length > 0) {
+    const lastScore = learner.scores[learner.scores.length - 1];
+    if (lastScore && lastScore.date) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(lastScore.date)) {
+        lastDate = lastScore.date;
+      } else {
+        const parsed = new Date(lastScore.date);
+        if (!isNaN(parsed.getTime())) {
+          lastDate = getLocalDateString(parsed);
+        }
+      }
+      if (rawStreak === 0) rawStreak = 1;
+    }
+  }
+
+  if (!lastDate) {
+    return { streak: 0, isActiveToday: false, bestStreak, isAtRisk: false, daysSinceLastLesson: -1 };
+  }
+
+  const diff = getDaysDifference(lastDate, todayStr);
+
+  if (diff === 0) {
+    const currentStreak = Math.max(1, rawStreak);
+    return {
+      streak: currentStreak,
+      isActiveToday: true,
+      bestStreak: Math.max(bestStreak, currentStreak),
+      isAtRisk: false,
+      daysSinceLastLesson: 0
+    };
+  } else if (diff === 1) {
+    return {
+      streak: Math.max(1, rawStreak),
+      isActiveToday: false,
+      bestStreak: Math.max(bestStreak, rawStreak),
+      isAtRisk: true,
+      daysSinceLastLesson: 1
+    };
+  } else {
+    // Missed 2 or more days, streak reset
+    return {
+      streak: 0,
+      isActiveToday: false,
+      bestStreak,
+      isAtRisk: false,
+      daysSinceLastLesson: diff
+    };
+  }
+}
+
+function getWeeklyStreakDays(learner?: LearnerProfile | null): {
+  label: string;
+  shortDay: string;
+  completed: boolean;
+  isToday: boolean;
+}[] {
+  const result: { label: string; shortDay: string; completed: boolean; isToday: boolean }[] = [];
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const today = new Date();
+  const todayStr = getLocalDateString(today);
+
+  const completedDateSet = new Set<string>();
+  if (learner?.lastLessonDate) {
+    completedDateSet.add(learner.lastLessonDate);
+  }
+  if (learner?.scores) {
+    learner.scores.forEach((s) => {
+      if (s.date) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s.date)) {
+          completedDateSet.add(s.date);
+        } else {
+          const parsed = new Date(s.date);
+          if (!isNaN(parsed.getTime())) {
+            completedDateSet.add(getLocalDateString(parsed));
+          }
+        }
+      }
+    });
+  }
+
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(today.getTime() - i * 86400000);
+    const dateStr = getLocalDateString(d);
+    const dayName = days[d.getDay()];
+    result.push({
+      label: dateStr,
+      shortDay: dayName.slice(0, 2),
+      completed: completedDateSet.has(dateStr),
+      isToday: dateStr === todayStr
+    });
+  }
+
+  return result;
 }
 
 interface CustomQuestion {
@@ -1185,212 +1338,526 @@ const FALLACIES: FallacyItem[] = [
 // INFINITE AI GENERATORS (MODULES 1-6)
 // ============================================================================
 
-// 1. TRUE/FALSE - Infinite
-function generateAITrueFalse(n = 10): StatementItem[] {
-  const groups = ["students", "teachers", "farmers", "traders", "nurses", "drivers"];
-  const actions = ["like mathematics", "grow maize", "work hard", "can cook", "go on holidays"];
-  return Array.from({ length: n }, (_, i) => {
-    const g = groups[Math.floor(Math.random() * groups.length)];
-    const a = actions[Math.floor(Math.random() * actions.length)];
-    const isAll = Math.random() > 0.5;
-    const text = isAll ? `All ${g} ${a}` : `Some ${g} ${a}`;
-    const answer = isAll ? (Math.random() > 0.7 ? "TRUE" : "FALSE") : "TRUE";
-    return {
-      id: Date.now() + i,
-      text,
-      answer,
-      level: "AI",
-      explanation: isAll ? `Not all ${g} ${a}` : `Some do`,
-      hint: isAll ? "ALL=100%?" : "SOME=at least one",
-      mode: "truefalse",
-      ai: true
-    };
-  });
+// 1. TRUE/FALSE - Infinite AI Question Generator
+function generateAITrueFalse(n: any = 10): StatementItem[] {
+  const safeN = typeof n === 'number' && !isNaN(n) && n > 0 ? n : 10;
+  const curatedBank: { text: string; answer: 'TRUE' | 'FALSE'; exp: string; hint: string }[] = [
+    {
+      text: "All Senior High School students in Ghana are human beings who require oxygen to survive.",
+      answer: "TRUE",
+      exp: "Universal claim (ALL): Biologically true without exception.",
+      hint: "ALL=100% with no possible counter-example."
+    },
+    {
+      text: "All teachers in Biakoye district Senior High Schools teach Elective Mathematics.",
+      answer: "FALSE",
+      exp: "Universal claim (ALL) is false: Teachers specialize across English, Science, Arts, and History.",
+      hint: "Does EVERY single teacher teach math?"
+    },
+    {
+      text: "Some farmers in the Volta and Oti Regions cultivate maize and cassava.",
+      answer: "TRUE",
+      exp: "Existential claim (SOME): True because at least one farmer cultivates these crops.",
+      hint: "SOME means at least one farmer does."
+    },
+    {
+      text: "No fish can survive permanently in dry air outside of water.",
+      answer: "TRUE",
+      exp: "Universal Negative (NONE): Biologically valid; gills require water to extract dissolved oxygen.",
+      hint: "NONE means zero instances exist."
+    },
+    {
+      text: "All traders at Kejetia and Makola markets sell imported mobile phones.",
+      answer: "FALSE",
+      exp: "A single trader selling cloth, vegetables, or spices disproves 'ALL'.",
+      hint: "Do 100% of traders sell phones?"
+    },
+    {
+      text: "Some Senior High School graduates gain admission to university each academic year.",
+      answer: "TRUE",
+      exp: "Existential statement: Factually true as many students qualify annually.",
+      hint: "SOME requires at least one student to qualify."
+    },
+    {
+      text: "Every vehicle travelling on the Accra-Kumasi highway has four wheels.",
+      answer: "FALSE",
+      exp: "Commercial motorbikes and tricycles (pragya) have 2 or 3 wheels, disproving 'EVERY'.",
+      hint: "Think about motorbikes or tricycles."
+    },
+    {
+      text: "Some Ghanaian athletes represent the nation at the African Games and Olympic Games.",
+      answer: "TRUE",
+      exp: "Existential claim: Multiple national athletes represent Ghana internationally.",
+      hint: "Have Ghanaian athletes competed?"
+    },
+    {
+      text: "All living green plants perform photosynthesis in the presence of sunlight to synthesize food.",
+      answer: "TRUE",
+      exp: "Universal scientific truth: Core characteristic of green plant biology.",
+      hint: "Fundamental biology principle."
+    },
+    {
+      text: "No student can achieve a 100% score on a WASSCE paper without writing any answers.",
+      answer: "TRUE",
+      exp: "Universal Negative: Submitting a blank script cannot logically produce maximum marks.",
+      hint: "Can a blank paper score 100%?"
+    },
+    {
+      text: "All doctors working in regional hospitals across Ghana were born in Accra.",
+      answer: "FALSE",
+      exp: "Doctors come from diverse regions across Ghana and internationally.",
+      hint: "Were 100% of doctors born in one city?"
+    },
+    {
+      text: "Some commercial tro-tro minibuses in Ghana are equipped with air conditioning.",
+      answer: "TRUE",
+      exp: "Existential claim: Although rare on older routes, modern VIP and commercial minibuses do have AC.",
+      hint: "SOME means at least one bus has it."
+    },
+    {
+      text: "All birds have wings.",
+      answer: "TRUE",
+      exp: "Anatomical fact: Even flightless birds like ostriches and penguins possess wings.",
+      hint: "Do ostriches and penguins have wings?"
+    },
+    {
+      text: "All birds can fly in the sky.",
+      answer: "FALSE",
+      exp: "Ostriches, penguins, and kiwis are birds that cannot fly, disproving 'ALL'.",
+      hint: "Can ostriches or penguins fly?"
+    },
+    {
+      text: "Some SHS boarders wake up before 5:00 AM for morning prep studies.",
+      answer: "TRUE",
+      exp: "True: Dedicated students wake early for private morning studies.",
+      hint: "Does at least one boarder do this?"
+    },
+    {
+      text: "Every rectangle is also a square.",
+      answer: "FALSE",
+      exp: "A rectangle whose length does not equal its width is NOT a square.",
+      hint: "Do all rectangles have 4 equal sides?"
+    },
+    {
+      text: "Every square is also a rectangle.",
+      answer: "TRUE",
+      exp: "A square has four right angles and opposite equal sides, satisfying rectangle definition.",
+      hint: "Does a square meet all rectangle criteria?"
+    },
+    {
+      text: "No prime number greater than 2 is an even number.",
+      answer: "TRUE",
+      exp: "Mathematical law: Any even number > 2 is divisible by 2, hence not prime.",
+      hint: "Can an even number > 2 be prime?"
+    },
+    {
+      text: "Some Ghanaian languages are taught as examinable subjects in the WASSCE curriculum.",
+      answer: "TRUE",
+      exp: "Twi (Asante/Akuapem), Fante, Ga, Ewe, Dangme, Dagbani, etc., are examinable.",
+      hint: "Are local languages tested in WASSCE?"
+    },
+    {
+      text: "All metals are in solid state at standard room temperature.",
+      answer: "FALSE",
+      exp: "Mercury is a liquid metal at room temperature, disproving 'ALL'.",
+      hint: "What state is mercury at room temperature?"
+    }
+  ];
+
+  const shuffledCurated = [...curatedBank].sort(() => 0.5 - Math.random());
+  const selected: StatementItem[] = [];
+
+  for (let i = 0; i < safeN; i++) {
+    if (i < shuffledCurated.length) {
+      const item = shuffledCurated[i];
+      selected.push({
+        id: `ai-tf-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`,
+        text: item.text,
+        answer: item.answer,
+        level: "AI",
+        explanation: item.exp,
+        hint: item.hint,
+        mode: "truefalse",
+        ai: true
+      });
+    } else {
+      // Combinatorial fallback for large batches
+      const subjects = [
+        "science students", "vocational students", "cocoa farmers", "market traders",
+        "carpentry apprentices", "hospital nurses", "football players", "choir members"
+      ];
+      const predicates = [
+        { verb: "study at night", isAll: false, ans: "TRUE" as const, exp: "Existential fact: At least some study at night." },
+        { verb: "own smartphones", isAll: false, ans: "TRUE" as const, exp: "Some do possess smartphones." },
+        { verb: "can speak French fluently", isAll: true, ans: "FALSE" as const, exp: "Not 100% speak French fluently; exceptions exist." },
+        { verb: "have travelled outside West Africa", isAll: true, ans: "FALSE" as const, exp: "A single exception disproves the universal claim." }
+      ];
+      const subj = subjects[i % subjects.length];
+      const pred = predicates[i % predicates.length];
+      const isUniversal = (i % 2 === 0);
+      const text = isUniversal ? `All ${subj} ${pred.verb}.` : `Some ${subj} ${pred.verb}.`;
+      const answer = isUniversal ? "FALSE" : "TRUE";
+      const exp = isUniversal ? `Universal quantifier 'ALL' fails because counter-examples exist.` : `Existential quantifier 'SOME' is satisfied because members do this.`;
+      selected.push({
+        id: `ai-tf-gen-${Date.now()}-${i}`,
+        text,
+        answer,
+        level: "AI",
+        explanation: exp,
+        hint: isUniversal ? "ALL requires 100% without exception." : "SOME requires at least one example.",
+        mode: "truefalse",
+        ai: true
+      });
+    }
+  }
+
+  return selected;
 }
 
-// 2. VENN - Infinite
-function generateAIVenn(n = 6): VennScenario[] {
-  const pairs = [
-    { l: "Students", r: "People who like Music" },
-    { l: "Farmers", r: "People who own Land" },
-    { l: "Girls", r: "People who can drive" },
-    { l: "Teachers", r: "People who speak French" },
-    { l: "Traders", r: "People who use Mobile Money" },
-    { l: "Nurses", r: "People who play Volleyball" }
+// 2. VENN DIAGRAM - Infinite AI Question Generator
+function generateAIVenn(n: any = 6): VennScenario[] {
+  const safeN = typeof n === 'number' && !isNaN(n) && n > 0 ? n : 6;
+  const library = [
+    { l: "Science Students", r: "School Debate Club Members", overlap: "Science Debaters" },
+    { l: "Cassava Farmers", r: "Corn Mill Operators", overlap: "Farmer-Millers" },
+    { l: "SHS Boarding Students", r: "School Football Team Players", overlap: "Boarding Athletes" },
+    { l: "Market Traders", r: "Mobile Money Agents", overlap: "MoMo Traders" },
+    { l: "Commercial Drivers", r: "Vehicle Owners", overlap: "Owner-Drivers" },
+    { l: "Teachers in Biakoye", r: "French Language Speakers", overlap: "French-speaking Teachers" },
+    { l: "Form 3 Students", r: "School Prefects", overlap: "Form 3 Prefects" },
+    { l: "Artisans & Carpenters", r: "Apprentice Mentors", overlap: "Master Craftsmen" },
+    { l: "Fishermen on Lake Volta", r: "Boat Engine Mechanics", overlap: "Fisherman Mechanics" },
+    { l: "Girls in SHS", r: "School Brass Band Players", overlap: "Female Band Members" },
+    { l: "Registered Voters", r: "Community PTA Members", overlap: "Voter PTA Members" },
+    { l: "Vegetable Sellers", r: "Cold Store Operators", overlap: "Cold Store Traders" },
+    { l: "Youth Club Members", r: "Computer Science Students", overlap: "Tech Youth" },
+    { l: "Tailors & Seamstresses", r: "Fabric Wholesalers", overlap: "Tailor Wholesalers" },
+    { l: "Agricultural Science Students", r: "Poultry Farmers", overlap: "Student Farmers" }
   ];
-  return pairs.slice(0, n).map((p, i) => {
-    const isAll = Math.random() > 0.5;
-    const q = isAll ? `All ${p.l} ${p.r.toLowerCase()}` : `Some ${p.l} ${p.r.toLowerCase()}`;
-    return {
-      id: `v-ai-${Date.now() + i}`,
-      left: p.l,
-      right: p.r,
-      overlap: `SOME ${p.l}`,
+
+  const shuffled = [...library].sort(() => 0.5 - Math.random());
+  const selectedScenarios: VennScenario[] = [];
+
+  for (let i = 0; i < safeN; i++) {
+    const pair = shuffled[i % shuffled.length];
+    const scenarioId = `v-ai-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`;
+    const questionType = i % 3;
+
+    let qText = "";
+    let qAns: "TRUE" | "FALSE" = "TRUE";
+    let qExp = "";
+
+    if (questionType === 0) {
+      qText = `All ${pair.l} are also ${pair.r}.`;
+      qAns = "FALSE";
+      qExp = `The Venn diagram shows an overlapping intersection: only SOME ${pair.l} belong to ${pair.r}, not all.`;
+    } else if (questionType === 1) {
+      qText = `Some ${pair.l} are also ${pair.r}.`;
+      qAns = "TRUE";
+      qExp = `The center intersection (${pair.overlap}) proves that at least some members belong to both sets simultaneously.`;
+    } else {
+      qText = `No ${pair.l} are members of ${pair.r}.`;
+      qAns = "FALSE";
+      qExp = `The intersection is not empty; there is a shared overlap (${pair.overlap}), disproving 'NONE'.`;
+    }
+
+    selectedScenarios.push({
+      id: scenarioId,
+      left: pair.l,
+      right: pair.r,
+      overlap: pair.overlap,
       ai: true,
       questions: [
         {
-          q,
-          a: q.startsWith("All") ? "FALSE" : "TRUE",
-          exp: "Overlap shows SOME"
+          q: qText,
+          a: qAns,
+          exp: qExp
         }
       ]
-    };
-  });
+    });
+  }
+
+  return selectedScenarios;
 }
 
-// 3. PATTERN - Infinite
-function generateAIPatterns(n = 10): PatternItem[] {
-  return Array.from({ length: n }, (_, i) => {
-    const add = Math.floor(Math.random() * 5) + 2;
-    const start = Math.floor(Math.random() * 10) + 1;
-    const seq = [start, start + add, start + add * 2];
-    const ans = start + add * 3;
-    const rawOptions = [ans, ans + 1, ans - 1, ans + add];
+// 3. PATTERN MASTER - Infinite AI Generator
+function generateAIPatterns(n: any = 10): PatternItem[] {
+  const safeN = typeof n === 'number' && !isNaN(n) && n > 0 ? n : 10;
+  const storyThemes = [
+    { name: "Kofi's market savings per week (GH₵)", unit: "GH₵" },
+    { name: "Bags of harvested maize packed in the storeroom", unit: "bags" },
+    { name: "Fish caught in Volta Lake daily", unit: "fish" },
+    { name: "Books catalogued in the school library", unit: "books" },
+    { name: "Distance run during morning athletic training (km)", unit: "km" },
+    { name: "Boxes of kenkey prepared for the festival", unit: "boxes" }
+  ];
+
+  return Array.from({ length: safeN }, (_, i) => {
+    const patternStyle = i % 4;
+    let seq: number[] = [];
+    let ans = 0;
+    let rule = "";
+    let type = "Adding";
+
+    if (patternStyle === 0) {
+      // Linear Addition
+      const step = (Math.floor(Math.random() * 6) + 2) * (i % 2 === 0 ? 1 : 2);
+      const start = Math.floor(Math.random() * 12) + 2;
+      seq = [start, start + step, start + step * 2, start + step * 3];
+      ans = start + step * 4;
+      rule = `Add ${step} each step`;
+      type = "Adding";
+    } else if (patternStyle === 1) {
+      // Subtraction (Downwards progression)
+      const step = Math.floor(Math.random() * 5) + 3;
+      const start = 60 + Math.floor(Math.random() * 20);
+      seq = [start, start - step, start - step * 2, start - step * 3];
+      ans = start - step * 4;
+      rule = `Subtract ${step} each step`;
+      type = "Subtracting";
+    } else if (patternStyle === 2) {
+      // Multiplicative Doubling
+      const start = Math.floor(Math.random() * 4) + 2;
+      seq = [start, start * 2, start * 4, start * 8];
+      ans = start * 16;
+      rule = "Multiply by 2 (Doubling)";
+      type = "Doubling";
+    } else {
+      // Alternating / Growing step (+2, +4, +6, +8)
+      const start = Math.floor(Math.random() * 5) + 1;
+      const s1 = start + 2;
+      const s2 = s1 + 4;
+      const s3 = s2 + 6;
+      seq = [start, s1, s2, s3];
+      ans = s3 + 8;
+      rule = "Add consecutive even numbers (+2, +4, +6, +8)";
+      type = "Growing Step";
+    }
+
+    const rawOptions = [ans, ans + 2, ans - 2, ans + 4, ans - 4];
     const options = Array.from(new Set(rawOptions)).slice(0, 4);
     while (options.length < 4) {
-      const candidate = ans + Math.floor(Math.random() * 8) - 4;
+      const candidate = ans + (Math.random() > 0.5 ? 6 : -6);
       if (!options.includes(candidate)) options.push(candidate);
     }
     options.sort(() => 0.5 - Math.random());
+
+    const theme = storyThemes[i % storyThemes.length];
+
     return {
-      id: 1000 + i,
+      id: 2000 + i + Math.floor(Math.random() * 5000),
       seq,
       answer: ans,
       options,
-      rule: `Add ${add}`,
-      type: "Adding",
+      rule,
+      type,
       level: "AI",
       ai: true,
       realWorld: {
-        story: `Item grows steadily by ${add} units each round.`,
-        answer: `Next round will total ${ans}.`
+        story: `${theme.name}: ${seq.join(", ")}... How many ${theme.unit} in the next interval?`,
+        answer: `Next interval totals ${ans} ${theme.unit} following the rule: ${rule}.`
       }
     };
   });
 }
 
-// 4. DECISION - Infinite (uses your 12 as base + random)
-function generateAIDecisions(n = 8): DecisionScenario[] {
-  const templates = [
+// 4. DECISION MAKER - Infinite AI Generator
+function generateAIDecisions(n: any = 8): DecisionScenario[] {
+  const safeN = typeof n === 'number' && !isNaN(n) && n > 0 ? n : 8;
+  const templates: {
+    title: string;
+    story: string;
+    category: 'Money' | 'School' | 'Farming' | 'Life';
+    opts: { name: string; cost: string; costTone: 'good' | 'medium' | 'bad'; gain: string; gainTone: 'good' | 'medium'; risk: string; riskTone: 'good' | 'bad'; best: boolean; rationale: string; overlooked?: string }[];
+    hint: string;
+    explanation: string;
+  }[] = [
     {
-      title: "Water for Farm",
-      story: "Crops need water. No rain 1 week.",
-      category: "Farming" as const,
-      opts: ["River free dirty", "Buy pipe water 100 cedis", "Wait for rain"]
+      title: "Irrigating Vegetables in Dry Season",
+      story: "Crops are wilting under dry harmattan heat. Stream is 1.5 km away and rainfall is not expected for 3 weeks.",
+      category: "Farming",
+      opts: [
+        { name: "Fetch water manually on foot twice a day", cost: "Free", costTone: "good", gain: "Low volume", gainTone: "medium", risk: "Severe physical exhaustion & crop death", riskTone: "bad", best: false, rationale: "Manual fetching cannot supply sufficient volume for a farm plot.", overlooked: "Physical Labor Limit & Water Volume" },
+        { name: "Buy water from tanker service at GH₵ 350 per trip", cost: "GH₵ 350 (High)", costTone: "bad", gain: "Instant water", gainTone: "good", risk: "Depletes all profit margins", riskTone: "bad", best: false, rationale: "Emergency tankers consume more cash than the vegetable yield is worth.", overlooked: "Financial Sustainability" },
+        { name: "Partner with adjacent farmer to rent a portable drip pump", cost: "GH₵ 70 shared", costTone: "good", gain: "Consistent high volume", gainTone: "good", risk: "Low (Shared responsibility)", riskTone: "good", best: true, rationale: "Cost-sharing and efficient drip irrigation protect both cash flow and crop yield." }
+      ],
+      hint: "Look for the balanced solution that shares cost while securing adequate water.",
+      explanation: "Cost-sharing infrastructure hedges individual financial risk while delivering needed resources."
     },
     {
-      title: "School Fees",
-      story: "You have 800 cedis. Fees 600, uniform 300.",
-      category: "School" as const,
-      opts: ["Pay fees only", "Buy uniform only", "Pay fees + mend uniform"]
+      title: "WASSCE Revision Time Strategy",
+      story: "You have 3 weeks until exams. You scored 75% in English, 80% in Social Studies, but 42% in Core Mathematics.",
+      category: "School",
+      opts: [
+        { name: "Study only English and Social Studies to guarantee Grade A1", cost: "Zero risk in easy subjects", costTone: "medium", gain: "High marks in strong areas", gainTone: "medium", risk: "Failing Core Mathematics blocks university entry", riskTone: "bad", best: false, rationale: "A failure in Core Mathematics invalidates high grades in other subjects.", overlooked: "Core Entry Requirements" },
+        { name: "Stop studying other subjects and study Mathematics 16 hours a day", cost: "High burnout risk", costTone: "bad", gain: "Math cramming", gainTone: "medium", risk: "Mental fatigue and dropping grades in other subjects", riskTone: "bad", best: false, rationale: "Extreme cramming causes cognitive fatigue and neglects other exams.", overlooked: "Cognitive Balance" },
+        { name: "Dedicate 60% of daily revision to Math with a study partner, 40% maintaining other subjects", cost: "Balanced effort", costTone: "good", gain: "Improves weak subject while securing strong grades", gainTone: "good", risk: "Low", riskTone: "good", best: true, rationale: "Strategic allocation addresses the critical bottleneck without sacrificing other grades." }
+      ],
+      hint: "Target the critical bottleneck subject while safeguarding overall performance.",
+      explanation: "A balanced study plan eliminates critical failure risks while avoiding burnout."
     },
     {
-      title: "Sell Harvest",
-      story: "Maize ready. Price low today, may rise.",
-      category: "Money" as const,
-      opts: ["Sell now", "Wait 1 week", "Sell half now half later"]
+      title: "Mobile Money Agent Capital Allocation",
+      story: "You have GH₵ 2,000 working capital as a MoMo merchant. Friday market day is coming with heavy cash withdrawal demand.",
+      category: "Money",
+      opts: [
+        { name: "Keep 100% of capital in e-cash on the SIM card", cost: "Zero physical cash", costTone: "bad", gain: "Easy transfer", gainTone: "medium", risk: "Cannot serve customers needing physical cash", riskTone: "bad", best: false, rationale: "Market day requires physical cash; customers will leave for competitors.", overlooked: "Customer Liquidity Needs" },
+        { name: "Withdraw 100% of capital as physical cash notes", cost: "Zero e-float", costTone: "bad", gain: "Cash available", gainTone: "medium", risk: "Cannot execute cash-in deposits; high theft risk", riskTone: "bad", best: false, rationale: "Carrying 100% physical cash prevents deposit transactions and invites theft.", overlooked: "Balanced Float Management" },
+        { name: "Maintain 65% in physical cash notes and 35% in e-float", cost: "Balanced liquidity", costTone: "good", gain: "Serves both deposits and withdrawals", gainTone: "good", risk: "Low (Safe operational ratio)", riskTone: "good", best: true, rationale: "A 65/35 ratio matches market day transaction patterns while hedging float lockouts." }
+      ],
+      hint: "Consider both transaction directions (deposits and withdrawals) on market days.",
+      explanation: "Optimal float distribution hedges against both stockouts and security vulnerabilities."
     },
     {
-      title: "Transport to Regional Exam",
-      story: "Exam in 3 hours. Road is muddy.",
-      category: "Life" as const,
-      opts: ["Wait for sunny dry road", "Charter reliable verified bus", "Speed on overloaded motorbike"]
+      title: "Transport to Regional Science Competition",
+      story: "The school science quiz begins at 9:00 AM in the regional capital, 45 km away. The road is muddy from heavy overnight downpour.",
+      category: "Life",
+      opts: [
+        { name: "Take an uninspected speeding motorcycle to beat the clock", cost: "Cheap & fast", costTone: "good", gain: "Arrive early", gainTone: "medium", risk: "Extreme accident & injury risk on wet mud", riskTone: "bad", best: false, rationale: "Severe safety risk outweighs punctuality.", overlooked: "Physical Safety" },
+        { name: "Wait until afternoon when the sun dries the road completely", cost: "Safe journey", costTone: "good", gain: "Clean travel", gainTone: "medium", risk: "Automatic disqualification (Miss event)", riskTone: "bad", best: false, rationale: "Missing the event completely defeats the preparation.", overlooked: "Time Deadline" },
+        { name: "Depart 2 hours early in a verified 4WD school transport with spare tire", cost: "Moderate fuel cost", costTone: "medium", gain: "Safe, guaranteed on-time arrival", gainTone: "good", risk: "Low", riskTone: "good", best: true, rationale: "Leaving early with reliable equipment buffers road delays without compromising safety." }
+      ],
+      hint: "Punctuality must be paired with safety by managing departure time.",
+      explanation: "Time buffers neutralize travel uncertainties safely."
+    },
+    {
+      title: "Food Preservation for Bumper Tomato Harvest",
+      story: "You harvested 15 crates of fresh tomatoes. Market price is currently depressed at GH₵ 30 per crate due to glut.",
+      category: "Farming",
+      opts: [
+        { name: "Dump all 15 crates at the market today for whatever buyers offer", cost: "Low revenue", costTone: "bad", gain: "Immediate cash", gainTone: "medium", risk: "Substantial financial loss", riskTone: "bad", best: false, rationale: "Accepting depressed prices fails to recover farming input costs.", overlooked: "Value Addition" },
+        { name: "Store crates in bedroom without ventilation hoping price rises next week", cost: "Zero immediate cost", costTone: "medium", gain: "Possible higher price", gainTone: "medium", risk: "100% spoilage and rotting within 4 days", riskTone: "bad", best: false, rationale: "Fresh tomatoes rot rapidly without cold storage or processing.", overlooked: "Perishability" },
+        { name: "Process and bottle into tomato puree / solar-dry into tomato flakes", cost: "Small processing effort", costTone: "good", gain: "Tripled shelf-life & 2x market price off-season", gainTone: "good", risk: "Low", riskTone: "good", best: true, rationale: "Processing preserves produce and enables selling when market supply declines." }
+      ],
+      hint: "Perishable gluts require preservation and value addition to protect investment.",
+      explanation: "Post-harvest processing converts perishable vulnerability into high-value durable inventory."
+    },
+    {
+      title: "Solar Power vs Generator for Evening Prep Hall",
+      story: "Grid electricity fails 3 evenings per week. 120 SHS boarders need reliable light for 3 hours of evening studies.",
+      category: "School",
+      opts: [
+        { name: "Use wax candles on each study desk", cost: "GH₵ 15 per night", costTone: "medium", gain: "Dim light", gainTone: "medium", risk: "Severe fire hazard and eye strain", riskTone: "bad", best: false, rationale: "Candles present unacceptable dorm fire risk and inadequate illumination.", overlooked: "Fire Safety & Student Health" },
+        { name: "Run petrol generator every evening without maintenance savings", cost: "GH₵ 60/night fuel", costTone: "bad", gain: "Bright light", gainTone: "good", risk: "High recurring fuel costs and noise/fumes", riskTone: "bad", best: false, rationale: "High recurring fuel expense drains school operational budget.", overlooked: "Long-term Operational Cost" },
+        { name: "Install solar roof panel with lithium battery and LED tubes", cost: "One-time capital cost", costTone: "medium", gain: "Free silent reliable light for 5+ years", gainTone: "good", risk: "Minimal", riskTone: "good", best: true, rationale: "Zero recurring fuel cost, clean quiet light, and high safety protect students and budget." }
+      ],
+      hint: "Evaluate upfront investment against ongoing recurring operational hazards.",
+      explanation: "Renewable capital investments eliminate hazardous recurring operational expenses."
     }
   ];
 
-  return Array.from({ length: n }, (_, i) => {
+  return Array.from({ length: safeN }, (_, i) => {
     const t = templates[i % templates.length];
     return {
-      id: `dec-ai-${200 + i}`,
+      id: `dec-ai-${Date.now()}-${i}`,
       category: t.category,
-      title: t.title + " (AI)",
+      title: `${t.title} (AI)`,
       story: t.story,
       options: t.opts.map((o, idx) => ({
         id: String.fromCharCode(65 + idx),
-        name: o,
-        cost: "Varies",
-        costTone: idx === 2 ? ('good' as const) : idx === 1 ? ('bad' as const) : ('medium' as const),
-        profit: "Varies",
-        gain: "Varies",
-        gainTone: idx === 2 ? ('good' as const) : ('medium' as const),
-        risk: idx === 2 ? "Low" : "Medium",
-        riskTone: idx === 2 ? ('good' as const) : ('bad' as const),
-        best: idx === 2,
-        rationale: idx === 2 ? "Balanced option hedges risk." : "Carries high single-factor vulnerability.",
-        overlookedFactor: idx === 2 ? undefined : "Balanced Risk Mitigation"
+        name: o.name,
+        cost: o.cost,
+        costTone: o.costTone,
+        profit: o.gain,
+        gain: o.gain,
+        gainTone: o.gainTone,
+        risk: o.risk,
+        riskTone: o.riskTone,
+        best: o.best,
+        rationale: o.rationale,
+        overlookedFactor: o.overlooked
       })),
-      factors: ["Cost", "Risk", "Profit"],
-      hint: "Balanced reduces risk",
-      explanation: "Balanced option is often logical",
-      alternativePerspective: "Some prefer extreme shortcuts, but balanced logic hedges risk effectively.",
+      factors: ["Financial Cost", "Physical Safety", "Long-term Return"],
+      hint: t.hint,
+      explanation: t.explanation,
+      alternativePerspective: "Short-term options seem quick, but balanced multi-factor evaluation preserves security and resources.",
       ai: true
     };
   });
 }
 
-// 5. ARGUMENT - Infinite
-function generateAIArguments(n = 6): ArgumentItem[] {
+// 5. ARGUMENT BUILDER - Infinite AI Generator
+function generateAIArguments(n: any = 6): ArgumentItem[] {
+  const safeN = typeof n === 'number' && !isNaN(n) && n > 0 ? n : 6;
   const templates = [
     {
-      p1: "If you fetch water daily, tank gets full",
-      p2: "Kwaku fetched water daily",
-      q: "Conclusion?",
-      opts: ["Tank is full", "Tank is empty", "No water", "Rain falls"],
-      ans: "Tank is full",
-      exp: "If P then Q, P true => Q true (Modus Ponens)",
-      type: "If-Then"
+      p1: "If you fetch water daily, the storeroom tank becomes full.",
+      p2: "Kwaku fetched water daily this entire week.",
+      q: "What valid conclusion follows?",
+      opts: ["The storeroom tank is full.", "The storeroom tank is empty.", "The pump was broken.", "Rain fell on the roof."],
+      ans: "The storeroom tank is full.",
+      exp: "Valid Modus Ponens (Affirming the Antecedent): If P then Q; P is True; therefore Q is True.",
+      type: "If-Then (Modus Ponens)"
     },
     {
-      p1: "If you save 10 cedis weekly",
-      p2: "4 weeks have passed",
-      q: "How much saved?",
-      opts: ["40", "10", "14", "0"],
-      ans: "40",
-      exp: "10x4=40 logical calculation",
-      type: "Calculation"
+      p1: "If the electric transformer blows a fuse, the prep hall lights go out.",
+      p2: "The prep hall lights are currently shining brightly.",
+      q: "What valid conclusion follows?",
+      opts: ["The transformer did not blow a fuse.", "The transformer blew a fuse.", "It is daytime outside.", "No conclusion is possible."],
+      ans: "The transformer did not blow a fuse.",
+      exp: "Valid Modus Tollens (Denying the Consequent): If P then Q; Not Q; therefore Not P.",
+      type: "Modus Tollens"
     },
     {
-      p1: "All SHS teachers are educated",
-      p2: "Mr. Mensah is an SHS teacher",
-      q: "What follows?",
-      opts: ["Mr. Mensah is educated", "Not educated", "Uncertain", "Teaches science"],
-      ans: "Mr. Mensah is educated",
-      exp: "All A are B, X is A => X is B (Universal Syllogism)",
-      type: "Syllogism"
+      p1: "All Senior High School teachers in Ghana have completed professional training.",
+      p2: "Mr. Mensah is a Senior High School teacher in Ghana.",
+      q: "What valid conclusion follows?",
+      opts: ["Mr. Mensah has completed professional training.", "Mr. Mensah teaches chemistry.", "Mr. Mensah is untested.", "Cannot be determined."],
+      ans: "Mr. Mensah has completed professional training.",
+      exp: "Universal Syllogism: All A are B; X is an A; therefore X is a B.",
+      type: "Universal Syllogism"
     },
     {
-      p1: "If cocoa harvest yields high, farmer earns bonus",
-      p2: "Cocoa harvest yielded high this season",
-      q: "Conclusion?",
-      opts: ["Farmer earns bonus", "Farmer loses money", "Prices drop", "No conclusion"],
-      ans: "Farmer earns bonus",
-      exp: "If P then Q, P true => Q true",
-      type: "If-Then"
+      p1: "If cocoa trees receive adequate rainfall and fertilizer, harvest yield is abundant.",
+      p2: "Farmer Osei's cocoa trees received adequate rainfall and fertilizer.",
+      q: "What valid conclusion follows?",
+      opts: ["Harvest yield is abundant.", "Harvest yield was poor.", "Cocoa prices dropped.", "No cocoa was harvested."],
+      ans: "Harvest yield is abundant.",
+      exp: "Valid Modus Ponens: Antecedent is satisfied, guaranteeing the consequent.",
+      type: "If-Then (Modus Ponens)"
     },
     {
-      p1: "Some market traders sell yam",
-      p2: "Aba is a market trader",
-      q: "Does Aba sell yam?",
-      opts: ["Cannot be sure", "Yes, definitely", "No, never", "All sell yam"],
-      ans: "Cannot be sure",
-      exp: "SOME traders sell yam, but not ALL. Can't be sure about Aba",
-      type: "Syllogism"
+      p1: "Either the inter-schools debate will take place in Assembly Hall or in Dining Hall.",
+      p2: "The headmaster confirmed the Assembly Hall is undergoing roof repairs (not in Assembly Hall).",
+      q: "What valid conclusion follows?",
+      opts: ["The debate will take place in Dining Hall.", "The debate is cancelled.", "The debate is in the library.", "Both halls will be used."],
+      ans: "The debate will take place in Dining Hall.",
+      exp: "Disjunctive Syllogism: Either A or B; Not A; therefore B must be True.",
+      type: "Disjunctive Syllogism"
     },
     {
-      p1: "If tro-tro engine lacks oil, bus overheats",
-      p2: "Tro-tro engine lacked oil",
-      q: "What happens?",
-      opts: ["Bus overheats", "Bus travels fast", "No change", "Bus turns green"],
-      ans: "Bus overheats",
-      exp: "If P then Q, P true => Q true",
-      type: "If-Then"
+      p1: "All mammals breathe air using lungs.",
+      p2: "Whales in the Atlantic Ocean are mammals.",
+      q: "What valid conclusion follows?",
+      opts: ["Whales breathe air using lungs.", "Whales breathe underwater like fish using gills.", "Whales do not breathe.", "Whales are reptiles."],
+      ans: "Whales breathe air using lungs.",
+      exp: "Universal Deductive Syllogism: Category properties apply to every member of the category.",
+      type: "Universal Syllogism"
+    },
+    {
+      p1: "If the engine oil leaks out, the tro-tro bus overheats.",
+      p2: "The mechanic verified that the tro-tro bus engine oil leaked out.",
+      q: "What will happen?",
+      opts: ["The bus overheats.", "The bus travels faster.", "The fuel tank refills itself.", "No change occurs."],
+      ans: "The bus overheats.",
+      exp: "If P then Q; P is given as True; therefore Q必然 follows.",
+      type: "If-Then (Modus Ponens)"
+    },
+    {
+      p1: "Some market traders in Kejetia sell fresh garden eggs.",
+      p2: "Aba is a market trader in Kejetia.",
+      q: "Does Aba definitely sell fresh garden eggs?",
+      opts: ["Cannot be determined with certainty.", "Yes, definitely.", "No, never.", "All market traders do."],
+      ans: "Cannot be determined with certainty.",
+      exp: "Quantifier 'SOME' does not guarantee that every specific member belongs to the subset.",
+      type: "Existential Analysis"
     }
   ];
 
-  return Array.from({ length: n }, (_, i) => {
+  return Array.from({ length: safeN }, (_, i) => {
     const t = templates[i % templates.length];
     return {
-      id: `ai-arg-${Date.now()}-${i}`,
+      id: `ai-arg-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`,
       premise1: t.p1,
       premise2: t.p2,
       q: t.q,
@@ -1403,63 +1870,80 @@ function generateAIArguments(n = 6): ArgumentItem[] {
   });
 }
 
-// 6. FALLACY - Infinite
-function generateAIFallacies(n = 6): FallacyItem[] {
+// 6. SPOT THE FALLACY - Infinite AI Generator
+function generateAIFallacies(n: any = 6): FallacyItem[] {
+  const safeN = typeof n === 'number' && !isNaN(n) && n > 0 ? n : 6;
   const templates = [
     {
-      statement: "A taxi driver overcharged me in Accra. All taxi drivers in Ghana are dishonest.",
-      q: "Is this logical?",
-      opts: ["Not always - fallacy", "Always logical", "No conclusion", "True"],
-      ans: "Not always - fallacy",
-      exp: "Judging all drivers based on one experience is Hasty Generalization",
+      statement: "A taxi driver overcharged my brother in Accra yesterday. Therefore, all taxi drivers in Ghana are dishonest thieves.",
+      q: "What logical flaw is present?",
+      opts: ["Hasty Generalization", "Sound Deductive Logic", "Proven Fact", "No Fallacy"],
+      ans: "Hasty Generalization",
+      exp: "Drawing a universal conclusion about thousands of people based on a single isolated incident is Hasty Generalization.",
       fallacy: "Hasty Generalization"
     },
     {
-      statement: "The black cat crossed the road and my pen broke. The cat caused my pen to break.",
-      q: "Fallacy?",
-      opts: ["False Cause", "Valid Causation", "Logical Deductive", "True Fact"],
-      ans: "False Cause",
-      exp: "Two unrelated events happening together is False Cause (Post hoc fallacy)",
+      statement: "A black cat crossed the road right as Kofi walked by, and 10 minutes later his phone screen cracked. The cat caused his phone to break.",
+      q: "What logical fallacy does this demonstrate?",
+      opts: ["False Cause (Post Hoc Ergo Propter Hoc)", "Direct Scientific Causation", "Universal Syllogism", "Valid Fact"],
+      ans: "False Cause (Post Hoc Ergo Propter Hoc)",
+      exp: "Assuming that because event B happened after event A, event A caused event B, without any causal connection.",
       fallacy: "False Cause"
     },
     {
-      statement: "Everyone in the village supports this football team, so it must be the greatest.",
-      q: "Fallacy?",
-      opts: ["Bandwagon", "Logical", "True", "No fallacy"],
-      ans: "Bandwagon",
-      exp: "Popularity does not equal quality or truth. Bandwagon fallacy",
+      statement: "Nine out of ten students in our dormitory are betting on this football game, so sports betting must be a wise financial investment.",
+      q: "Which logical fallacy is being used?",
+      opts: ["Bandwagon Fallacy (Appeal to Popularity)", "Sound Financial Logic", "Modus Ponens", "Scientific Proof"],
+      ans: "Bandwagon Fallacy (Appeal to Popularity)",
+      exp: "Arguing that an action is good or true simply because many people are doing it.",
       fallacy: "Bandwagon"
     },
     {
-      statement: "Kwabena is a boy. Boys cannot cook or bake. So Kwabena cannot.",
-      q: "Logical?",
-      opts: ["Illogical - false premise", "Logical", "True", "Valid"],
-      ans: "Illogical - false premise",
-      exp: "The premise 'Boys cannot cook' is a FALSE cultural stereotype",
-      fallacy: "Stereotype"
+      statement: "Do not listen to Kwabena's suggestion about fixing the science lab microscope; he arrived late to morning assembly last week.",
+      q: "What logical fallacy is committed here?",
+      opts: ["Ad Hominem (Personal Attack)", "Valid Scientific Criticism", "Sound Reasoning", "Logical Deductive Step"],
+      ans: "Ad Hominem (Personal Attack)",
+      exp: "Attacking the speaker's personal punctuality instead of addressing the validity of his technical suggestion.",
+      fallacy: "Ad Hominem"
     },
     {
-      statement: "I drank cold water before my exam and failed. Drinking water caused my failure.",
-      q: "Logical?",
-      opts: ["Not logical - no causation", "Logical", "True cause", "Valid"],
-      ans: "Not logical - no causation",
-      exp: "Drinking water does not cause exam failure. False Cause",
-      fallacy: "False Cause"
+      statement: "Either you buy the most expensive smartphone on the market today, or you will fail your WASSCE exams completely.",
+      q: "What fallacy is presented in this statement?",
+      opts: ["False Dilemma (Black-and-White Fallacy)", "Realistic Assessment", "Universal Modus Tollens", "Sound Warning"],
+      ans: "False Dilemma (Black-and-White Fallacy)",
+      exp: "Falsely reducing a complex situation to only two extreme options when many reasonable alternatives exist.",
+      fallacy: "False Dilemma"
     },
     {
-      statement: "My friend bought shoes from this stall and the sole peeled off. Every shoe here is bad.",
-      q: "Fallacy?",
-      opts: ["Hasty Generalization", "Sound Logic", "Proven Fact", "No fallacy"],
-      ans: "Hasty Generalization",
-      exp: "One bad shoe is not enough evidence to judge all shoes. Hasty Generalization",
-      fallacy: "Hasty Generalization"
+      statement: "A famous highlife musician said this herbal mixture cures typhoid and malaria, so we do not need to visit the hospital clinic.",
+      q: "What logical flaw exists in this argument?",
+      opts: ["Appeal to Unqualified Authority", "Sound Medical Advice", "Direct Biological Proof", "Valid Causation"],
+      ans: "Appeal to Unqualified Authority",
+      exp: "Citing the endorsement of a celebrity who lacks medical and scientific credentials.",
+      fallacy: "Appeal to Authority"
+    },
+    {
+      statement: "Kwaku is a male student. Boys cannot bake or cook nutritious meals. Therefore, Kwaku cannot cook.",
+      q: "Why is this reasoning flawed?",
+      opts: ["False Premise & Cultural Stereotyping", "Valid Biological Fact", "True Deductive Law", "Mathematical Proof"],
+      ans: "False Premise & Cultural Stereotyping",
+      exp: "The premise that boys cannot cook is factually untrue and based on cultural bias rather than logical validity.",
+      fallacy: "Cultural Stereotype"
+    },
+    {
+      statement: "If you miss one single evening prep session, you will fail your mock, get suspended from school, and end up jobless for life.",
+      q: "What logical fallacy is committed?",
+      opts: ["Slippery Slope Fallacy", "Accurate Prediction", "Modus Tollens", "Sound Warning"],
+      ans: "Slippery Slope Fallacy",
+      exp: "Assuming without evidence that a minor initial step will inevitably trigger a catastrophic chain of events.",
+      fallacy: "Slippery Slope"
     }
   ];
 
-  return Array.from({ length: n }, (_, i) => {
+  return Array.from({ length: safeN }, (_, i) => {
     const t = templates[i % templates.length];
     return {
-      id: `ai-fal-${Date.now()}-${i}`,
+      id: `ai-fal-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`,
       statement: t.statement,
       q: t.q,
       opts: [...t.opts].sort(() => 0.5 - Math.random()),
@@ -1476,7 +1960,7 @@ function getConceptCategory(text: string): 'ALL' | 'SOME' | 'NONE' | 'GENERAL' {
   const upper = text.toUpperCase();
   if (upper.includes('ALL') || upper.includes('EVERY')) return 'ALL';
   if (upper.includes('SOME') || upper.includes('MIGHT')) return 'SOME';
-  if (upper.includes('NO ') || upper.includes('CANNOT') || upper.includes('NEVER')) return 'NONE';
+  if (upper.includes('NO ') || upper.includes('CANNOT') || upper.includes('NEVER') || upper.includes('NONE')) return 'NONE';
   return 'GENERAL';
 }
 
@@ -1697,7 +2181,51 @@ export default function App() {
 
   // Lesson 1 & 2 Quiz State
   const [customQuestionsPool, setCustomQuestionsPool] = useState<PlayableQuestion[]>([]);
-  const [aiExtraQuestions, setAiExtraQuestions] = useState<PlayableQuestion[]>([]);
+  const [aiExtraTrueFalse, setAiExtraTrueFalse] = useState<PlayableQuestion[]>(() => {
+    try {
+      const saved = localStorage.getItem('logicmaster_ai_extra_truefalse');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [aiExtraVenn, setAiExtraVenn] = useState<PlayableQuestion[]>(() => {
+    try {
+      const saved = localStorage.getItem('logicmaster_ai_extra_venn');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [showAiGeneratorHub, setShowAiGeneratorHub] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage((prev) => (prev === msg ? null : prev));
+    }, 3800);
+  };
+
+  const renderToast = () => {
+    if (!toastMessage) return null;
+    return (
+      <div className="fixed top-3 inset-x-3 max-w-sm mx-auto z-50 pointer-events-none animate-in fade-in slide-in-from-top-4">
+        <div className="bg-slate-900 text-white px-4 py-3 rounded-2xl shadow-2xl border border-slate-700 flex items-center justify-between gap-3 text-xs sm:text-sm font-semibold pointer-events-auto">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>{toastMessage}</span>
+          </div>
+          <button
+            onClick={() => setToastMessage(null)}
+            className="text-slate-400 hover:text-white text-xs px-1"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    );
+  };
   const [currentIndex, setCurrentIndex] = useState(0);
   const [score, setScore] = useState(0);
   const [wrongAnswers, setWrongAnswers] = useState<WrongAnswerRecord[]>([]);
@@ -1715,7 +2243,14 @@ export default function App() {
   const [showPatternFeedback, setShowPatternFeedback] = useState(false);
   const [isPatternCorrect, setIsPatternCorrect] = useState(false);
   const [masteredPatternTypes, setMasteredPatternTypes] = useState<string[]>([]);
-  const [aiExtraPatterns, setAiExtraPatterns] = useState<PatternItem[]>([]);
+  const [aiExtraPatterns, setAiExtraPatterns] = useState<PatternItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('logicmaster_ai_extra_patterns');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Lesson 4: Decision Maker State
   const [decisionIndex, setDecisionIndex] = useState(0);
@@ -1726,7 +2261,14 @@ export default function App() {
   const [decisionActiveStep, setDecisionActiveStep] = useState<number>(1); // 1: Problem, 2: Options, 3: Factors, 4: Evaluate, 5: Decide
   const [showFactorTable, setShowFactorTable] = useState(false);
   const [decisionCategoryFilter, setDecisionCategoryFilter] = useState<'All' | 'Money' | 'School' | 'Farming' | 'Life'>('All');
-  const [aiExtraDecisions, setAiExtraDecisions] = useState<DecisionScenario[]>([]);
+  const [aiExtraDecisions, setAiExtraDecisions] = useState<DecisionScenario[]>(() => {
+    try {
+      const saved = localStorage.getItem('logicmaster_ai_extra_decisions');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [overlookedFactorsLog, setOverlookedFactorsLog] = useState<string[]>([]);
 
   // Lesson 5: Argument Builder State (Week 3)
@@ -1736,7 +2278,14 @@ export default function App() {
   const [showArgumentHint, setShowArgumentHint] = useState(false);
   const [showArgumentFeedback, setShowArgumentFeedback] = useState(false);
   const [isArgumentCorrect, setIsArgumentCorrect] = useState(false);
-  const [aiExtraArguments, setAiExtraArguments] = useState<ArgumentItem[]>([]);
+  const [aiExtraArguments, setAiExtraArguments] = useState<ArgumentItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('logicmaster_ai_extra_arguments');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Lesson 6: Spot the Fallacy State (Week 3)
   const [fallacyIndex, setFallacyIndex] = useState(0);
@@ -1745,13 +2294,40 @@ export default function App() {
   const [showFallacyHint, setShowFallacyHint] = useState(false);
   const [showFallacyFeedback, setShowFallacyFeedback] = useState(false);
   const [isFallacyCorrect, setIsFallacyCorrect] = useState(false);
-  const [aiExtraFallacies, setAiExtraFallacies] = useState<FallacyItem[]>([]);
+  const [aiExtraFallacies, setAiExtraFallacies] = useState<FallacyItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('logicmaster_ai_extra_fallacies');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Hidden Teacher Access & PIN Modal
   const [showPinModal, setShowPinModal] = useState(false);
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState('');
   const [allLearners, setAllLearners] = useState<LearnerProfile[]>([]);
+  const [cloudLearners, setCloudLearners] = useState<CloudLearnerRecord[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+
+  // Subscribe to Cloud Data for Teacher Monitor
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+    });
+
+    const unsubCloud = subscribeToClassroomLearners((records) => {
+      setCloudLearners(records);
+    });
+
+    testConnection();
+
+    return () => {
+      unsubAuth();
+      unsubCloud();
+    };
+  }, []);
 
   // Create-Your-Own state (6 tabs)
   const [createActiveTab, setCreateActiveTab] = useState<'truefalse' | 'venn' | 'pattern' | 'decision' | 'argument' | 'fallacy'>('truefalse');
@@ -1788,8 +2364,11 @@ export default function App() {
     }));
   }, []);
 
-  // Initialize storage & check URL hash for #teacher
+  // Initialize storage & check URL hash for #teacher + Real-time Firestore sync
   useEffect(() => {
+    // 1. Validate connection to Firestore on boot
+    testConnection();
+
     try {
       const storedLearners: LearnerProfile[] = JSON.parse(localStorage.getItem('logicmaster_learners') || '[]');
       setAllLearners(storedLearners);
@@ -1819,6 +2398,38 @@ export default function App() {
       // Safe fallback
     }
 
+    // 2. Real-time Classroom Sync: Listen for all learners across all devices
+    const unsubscribeCloud = subscribeToClassroomLearners((cloudRecords) => {
+      if (cloudRecords && cloudRecords.length > 0) {
+        setAllLearners((prevLocal) => {
+          const map = new Map<string, LearnerProfile>();
+          // Add local records first
+          prevLocal.forEach((l) => map.set(l.name.toLowerCase().trim(), l));
+          // Overlay cloud records (cross-device authoritative sync)
+          cloudRecords.forEach((c) => {
+            const numId = Number(c.id) || Date.now();
+            map.set(c.name.toLowerCase().trim(), {
+              id: numId,
+              name: c.name,
+              scores: c.scores || [],
+              avg: c.avg || 0,
+              weak: c.weak || [],
+              lastSeen: c.lastSeen || new Date().toISOString(),
+              streak: c.streak || 0,
+              lastLessonDate: c.lastLessonDate || '',
+              bestStreak: c.bestStreak || 0,
+              activeApp: c.activeApp || 'Active'
+            });
+          });
+          const merged = Array.from(map.values());
+          try {
+            localStorage.setItem('logicmaster_learners', JSON.stringify(merged));
+          } catch { /* safe */ }
+          return merged;
+        });
+      }
+    });
+
     if (window.location.hash === '#teacher') {
       setShowPinModal(true);
     }
@@ -1830,8 +2441,48 @@ export default function App() {
     };
 
     window.addEventListener('hashchange', handleHashChange);
-    return () => window.removeEventListener('hashchange', handleHashChange);
+    return () => {
+      window.removeEventListener('hashchange', handleHashChange);
+      unsubscribeCloud();
+    };
   }, []);
+
+  // Save AI-generated questions to localStorage for offline persistence
+  useEffect(() => {
+    try {
+      localStorage.setItem('logicmaster_ai_extra_truefalse', JSON.stringify(aiExtraTrueFalse));
+    } catch { /* safe */ }
+  }, [aiExtraTrueFalse]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('logicmaster_ai_extra_venn', JSON.stringify(aiExtraVenn));
+    } catch { /* safe */ }
+  }, [aiExtraVenn]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('logicmaster_ai_extra_patterns', JSON.stringify(aiExtraPatterns));
+    } catch { /* safe */ }
+  }, [aiExtraPatterns]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('logicmaster_ai_extra_decisions', JSON.stringify(aiExtraDecisions));
+    } catch { /* safe */ }
+  }, [aiExtraDecisions]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('logicmaster_ai_extra_arguments', JSON.stringify(aiExtraArguments));
+    } catch { /* safe */ }
+  }, [aiExtraArguments]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('logicmaster_ai_extra_fallacies', JSON.stringify(aiExtraFallacies));
+    } catch { /* safe */ }
+  }, [aiExtraFallacies]);
 
   // Challenge countdown timer
   useEffect(() => {
@@ -1900,7 +2551,7 @@ export default function App() {
         mode: 'truefalse' as const,
         conceptType: getConceptCategory(st.text)
       }));
-      return [...base, ...aiExtraQuestions];
+      return [...base, ...aiExtraTrueFalse];
     }
 
     if (activeLesson === 'venn') {
@@ -1921,7 +2572,7 @@ export default function App() {
           conceptType: getConceptCategory(q.q)
         }))
       );
-      return [...base, ...aiExtraQuestions];
+      return [...base, ...aiExtraVenn];
     }
 
     if (activeLesson === 'custom') {
@@ -1929,11 +2580,11 @@ export default function App() {
     }
 
     if (activeLesson === 'ai') {
-      return aiExtraQuestions;
+      return [...aiExtraTrueFalse, ...aiExtraVenn];
     }
 
     return [];
-  }, [activeLesson, aiExtraQuestions, customQuestionsPool]);
+  }, [activeLesson, aiExtraTrueFalse, aiExtraVenn, customQuestionsPool]);
 
   // Filtered patterns list for Lesson 3
   const activePatterns: PatternItem[] = useMemo(() => {
@@ -1970,6 +2621,15 @@ export default function App() {
     activeArguments[argumentIndex] || ARGUMENTS[0];
   const currentFallacy: FallacyItem =
     activeFallacies[fallacyIndex] || FALLACIES[0];
+
+  // Daily Streak calculations for the active learner
+  const effectiveStreak = useMemo(() => {
+    return getEffectiveStreak(currentLearner);
+  }, [currentLearner]);
+
+  const weeklyStreakDays = useMemo(() => {
+    return getWeeklyStreakDays(currentLearner);
+  }, [currentLearner]);
 
   // Voice speech synthesis
   const speakText = (text: string) => {
@@ -2014,7 +2674,11 @@ export default function App() {
           scores: [],
           avg: 0,
           weak: [],
-          lastSeen: new Date().toISOString()
+          lastSeen: new Date().toISOString(),
+          streak: 0,
+          lastLessonDate: '',
+          bestStreak: 0,
+          ownerId: auth.currentUser?.uid || 'anonymous'
         };
         existing.push(activeProfile);
       }
@@ -2025,6 +2689,20 @@ export default function App() {
       setCurrentLearner(activeProfile);
       setChallengeP1Name(activeProfile.name);
       setScreen('welcome');
+
+      // Sync to Cloud Firestore so Teacher Monitor instantly sees learner login
+      syncLearnerToCloud({
+        id: String(activeProfile.id),
+        name: activeProfile.name,
+        scores: activeProfile.scores,
+        avg: activeProfile.avg,
+        weak: activeProfile.weak,
+        lastSeen: activeProfile.lastSeen,
+        streak: activeProfile.streak,
+        lastLessonDate: activeProfile.lastLessonDate,
+        bestStreak: activeProfile.bestStreak,
+        activeApp: 'Welcome Screen'
+      });
     } catch {
       // Fallback
     }
@@ -2038,6 +2716,7 @@ export default function App() {
   };
 
   // Record learner progress across all 6 lessons
+  // Record learner progress across all 6 lessons with daily streak tracking
   const updateLearnerHistory = (
     lessonMode: 'truefalse' | 'venn' | 'pattern' | 'decision' | 'argument' | 'fallacy' | 'custom' | 'ai',
     finalScore: number,
@@ -2047,8 +2726,9 @@ export default function App() {
 
     try {
       const pct = Math.round((finalScore / (total || 1)) * 100);
+      const todayStr = getLocalDateString();
       const newScoreItem: LearnerScoreItem = {
-        date: new Date().toLocaleDateString(),
+        date: todayStr,
         mode: lessonMode,
         score: finalScore,
         total,
@@ -2057,6 +2737,29 @@ export default function App() {
 
       const updatedScores = [...currentLearner.scores, newScoreItem];
       const avg = Math.round(updatedScores.reduce((acc, curr) => acc + curr.pct, 0) / updatedScores.length);
+
+      // Streak calculation based on consecutive days
+      const prevLastDate = currentLearner.lastLessonDate;
+      const prevStreak = typeof currentLearner.streak === 'number' ? currentLearner.streak : 0;
+      const prevBest = typeof currentLearner.bestStreak === 'number' ? currentLearner.bestStreak : prevStreak;
+
+      let newStreak = 1;
+      if (!prevLastDate) {
+        newStreak = 1;
+      } else {
+        const diff = getDaysDifference(prevLastDate, todayStr);
+        if (diff === 0) {
+          // Already completed a lesson today; maintain current active streak
+          newStreak = Math.max(1, prevStreak);
+        } else if (diff === 1) {
+          // Completed yesterday; consecutive streak increment!
+          newStreak = prevStreak + 1;
+        } else {
+          // Missed 2 or more days; start fresh streak of 1 today
+          newStreak = 1;
+        }
+      }
+      const newBest = Math.max(prevBest, newStreak);
 
       const weakSet = new Set<string>(currentLearner.weak || []);
       if (lessonMode === 'pattern' && pct < 70) weakSet.add('Numerical Patterns');
@@ -2075,7 +2778,10 @@ export default function App() {
         scores: updatedScores,
         avg,
         weak: Array.from(weakSet),
-        lastSeen: new Date().toISOString()
+        lastSeen: new Date().toISOString(),
+        streak: newStreak,
+        lastLessonDate: todayStr,
+        bestStreak: newBest
       };
 
       setCurrentLearner(updatedLearner);
@@ -2090,6 +2796,24 @@ export default function App() {
 
       localStorage.setItem('logicmaster_learners', JSON.stringify(stored));
       setAllLearners(stored);
+
+      // 3. Real-time Cloud Sync: Update shared classroom database
+      syncLearnerToCloud({
+        id: String(updatedLearner.id),
+        name: updatedLearner.name,
+        scores: updatedLearner.scores,
+        avg: updatedLearner.avg,
+        weak: updatedLearner.weak,
+        lastSeen: updatedLearner.lastSeen,
+        streak: updatedLearner.streak,
+        lastLessonDate: updatedLearner.lastLessonDate,
+        bestStreak: updatedLearner.bestStreak,
+        activeApp: lessonMode
+      });
+
+      if (newStreak > prevStreak) {
+        showToast(`🔥 Daily Streak: ${newStreak} Day${newStreak > 1 ? 's' : ''}! Keep the streak alive!`);
+      }
     } catch {
       // Safe fallback
     }
@@ -2143,7 +2867,6 @@ export default function App() {
       return;
     }
 
-    setAiExtraQuestions([]);
     setScreen('quiz');
     setCurrentIndex(0);
     setScore(0);
@@ -2220,45 +2943,93 @@ export default function App() {
     }
   };
 
-  const handleAppendAITrueFalse = () => {
-    const newItems = generateAITrueFalse(10);
-    const playable: PlayableQuestion[] = newItems.map((st) => ({
-      id: `ai-tf-${st.id}`,
-      text: st.text,
-      answer: st.answer,
-      explanation: st.explanation,
-      hint: st.hint,
-      level: st.level,
-      mode: 'truefalse' as const,
-      conceptType: getConceptCategory(st.text)
-    }));
-    setAiExtraQuestions((prev) => [...prev, ...playable]);
-    setCurrentIndex(questions.length);
-    setScreen('quiz');
+  const handleAppendAITrueFalse = async (countArg?: any, launchImmediately = false) => {
+    const count = typeof countArg === 'number' && !isNaN(countArg) && countArg > 0 ? countArg : 10;
+    const isLaunch = typeof countArg === 'boolean' ? countArg : Boolean(launchImmediately);
+    showToast(`🤖 Generating ${count} AI questions...`);
+    
+    try {
+      const res = await fetch('/api/ai/generate-truefalse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count })
+      });
+      const data = await res.json();
+      const playable: PlayableQuestion[] = data.questions.map((st: any) => ({
+        id: `ai-tf-${Date.now()}-${Math.random()}`,
+        text: st.text,
+        answer: st.answer,
+        explanation: st.explanation,
+        hint: st.hint,
+        level: 'AI',
+        mode: 'truefalse' as const,
+        conceptType: getConceptCategory(st.text)
+      }));
+      
+      setAiExtraTrueFalse((prev) => [...prev, ...playable]);
+      showToast(`✨ Successfully added ${playable.length} AI questions!`);
+      
+      if (isLaunch) {
+        setActiveLesson('truefalse');
+        setCurrentIndex(0);
+        setScore(0);
+        setWrongAnswers([]);
+        setShowHint(false);
+        setShowFeedback(false);
+        setLastUserAnswer(null);
+        setScreen('quiz');
+      }
+    } catch (err) {
+      showToast('❌ Failed to generate AI questions. Check your connection.');
+    }
   };
 
-  const handleAppendAIVenn = () => {
-    const newScenarios = generateAIVenn(6);
-    const playable: PlayableQuestion[] = newScenarios.flatMap((scenario) =>
-      scenario.questions.map((q, qIdx) => ({
-        id: `${scenario.id}-q${qIdx}`,
-        text: q.q,
-        answer: q.a,
-        explanation: q.exp,
-        hint: `Look at the overlap: "${scenario.overlap}"`,
-        mode: 'venn' as const,
-        scenario: {
-          id: scenario.id,
-          left: scenario.left,
-          right: scenario.right,
-          overlap: scenario.overlap
-        },
-        conceptType: getConceptCategory(q.q)
-      }))
-    );
-    setAiExtraQuestions((prev) => [...prev, ...playable]);
-    setCurrentIndex(questions.length);
-    setScreen('quiz');
+  const handleAppendAIVenn = async (countArg?: any, launchImmediately = false) => {
+    const count = typeof countArg === 'number' && !isNaN(countArg) && countArg > 0 ? countArg : 6;
+    const isLaunch = typeof countArg === 'boolean' ? countArg : Boolean(launchImmediately);
+    showToast(`🤖 Generating ${count} AI Venn sets...`);
+
+    try {
+      const res = await fetch('/api/ai/generate-venn', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count })
+      });
+      const data = await res.json();
+      const playable: PlayableQuestion[] = data.scenarios.flatMap((scenario: any) =>
+        scenario.questions.map((q: any, qIdx: number) => ({
+          id: `ai-venn-${Date.now()}-${Math.random()}-q${qIdx}`,
+          text: q.q,
+          answer: q.a,
+          explanation: q.exp,
+          hint: `Look at the overlap: "${scenario.overlap}"`,
+          mode: 'venn' as const,
+          scenario: {
+            id: scenario.id || `ai-sc-${Date.now()}`,
+            left: scenario.left,
+            right: scenario.right,
+            overlap: scenario.overlap
+          },
+          conceptType: getConceptCategory(q.q)
+        }))
+      );
+
+      setAiExtraVenn((prev) => [...prev, ...playable]);
+      showToast(`✨ Successfully added ${data.scenarios.length} AI Venn sets!`);
+
+      if (isLaunch) {
+        setActiveLesson('venn');
+        setCurrentIndex(0);
+        setScore(0);
+        setWrongAnswers([]);
+        setShowHint(false);
+        setShowFeedback(false);
+        setLastUserAnswer(null);
+        setScreen('quiz');
+      }
+    } catch (err) {
+      showToast('❌ Failed to generate AI Venn sets.');
+    }
   };
 
   const handleAppendAIQuestions = handleAppendAITrueFalse;
@@ -2303,11 +3074,39 @@ export default function App() {
     }
   };
 
-  const handleAppendAIPatterns = () => {
-    const newItems = generateAIPatterns(10);
-    setAiExtraPatterns((prev) => [...prev, ...newItems]);
-    setPatternIndex(activePatterns.length);
-    setScreen('patternGame');
+  const handleAppendAIPatterns = async (countArg?: any, launchImmediately = false) => {
+    const count = typeof countArg === 'number' && !isNaN(countArg) && countArg > 0 ? countArg : 10;
+    const isLaunch = typeof countArg === 'boolean' ? countArg : Boolean(launchImmediately);
+    showToast(`🤖 Generating ${count} AI patterns...`);
+    
+    try {
+      const res = await fetch('/api/ai/generate-patterns', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count })
+      });
+      const data = await res.json();
+      const playable: PatternItem[] = data.patterns.map((p: any) => ({
+        ...p,
+        id: `ai-pat-${Date.now()}-${Math.random()}`,
+        ai: true
+      }));
+      
+      setAiExtraPatterns((prev) => [...prev, ...playable]);
+      showToast(`✨ Successfully added ${playable.length} AI patterns!`);
+      
+      if (isLaunch) {
+        setActiveLesson('pattern');
+        setPatternIndex(0);
+        setPatternScore(0);
+        setSelectedPatternOption(null);
+        setShowPatternHint(false);
+        setShowPatternFeedback(false);
+        setScreen('patternGame');
+      }
+    } catch (err) {
+      showToast('❌ Failed to generate AI patterns.');
+    }
   };
 
   // --------------------------------------------------------------------------
@@ -2364,15 +3163,49 @@ export default function App() {
     }
   };
 
-  const handleGenerateMoreDecisions = () => {
-    const newItems = generateAIDecisions(8);
-    setAiExtraDecisions((prev) => [...prev, ...newItems]);
+  const handleGenerateMoreDecisions = async (countArg?: any) => {
+    const count = typeof countArg === 'number' && !isNaN(countArg) && countArg > 0 ? countArg : 8;
+    showToast(`🤖 Generating ${count} AI scenarios...`);
+    
+    try {
+      const res = await fetch('/api/ai/generate-decisions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count })
+      });
+      const data = await res.json();
+      const playable: DecisionScenario[] = data.scenarios.map((sc: any) => ({
+        id: `ai-dec-${Date.now()}-${Math.random()}`,
+        text: sc.scenario,
+        options: sc.options.map((opt: any) => ({
+          ...opt,
+          id: `opt-${Math.random()}`
+        })),
+        ai: true
+      }));
+      
+      setAiExtraDecisions((prev) => [...prev, ...playable]);
+      showToast(`✨ Successfully added ${playable.length} AI scenarios!`);
+    } catch (err) {
+      showToast('❌ Failed to generate AI scenarios.');
+    }
   };
-
-  const handleAppendAIDecisions = () => {
-    handleGenerateMoreDecisions();
-    setDecisionIndex(filteredDecisions.length);
-    setScreen('decisionGame');
+  
+  // Re-define handleAppendAIDecisions to wait for generator if launching
+  const handleAppendAIDecisions = async (countArg?: any, launchImmediately = false) => {
+    const isLaunch = typeof countArg === 'boolean' ? countArg : Boolean(launchImmediately);
+    await handleGenerateMoreDecisions(countArg);
+    if (isLaunch) {
+      setActiveLesson('decision');
+      setDecisionIndex(0);
+      setDecisionScore(0);
+      setDecisionSelectedOption(null);
+      setShowDecisionHint(false);
+      setShowDecisionFeedback(false);
+      setDecisionActiveStep(1);
+      setShowFactorTable(false);
+      setScreen('decisionGame');
+    }
   };
 
   // --------------------------------------------------------------------------
@@ -2405,11 +3238,43 @@ export default function App() {
     }
   };
 
-  const handleAppendAIArguments = () => {
-    const newItems = generateAIArguments(6);
-    setAiExtraArguments((prev) => [...prev, ...newItems]);
-    setArgumentIndex(activeArguments.length);
-    setScreen('argumentGame');
+  const handleAppendAIArguments = async (countArg?: any, launchImmediately = false) => {
+    const count = typeof countArg === 'number' && !isNaN(countArg) && countArg > 0 ? countArg : 6;
+    const isLaunch = typeof countArg === 'boolean' ? countArg : Boolean(launchImmediately);
+    showToast(`🤖 Generating ${count} AI arguments...`);
+    
+    try {
+      const res = await fetch('/api/ai/generate-arguments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count })
+      });
+      const data = await res.json();
+      const playable: ArgumentItem[] = data.arguments.map((arg: any) => ({
+        id: `ai-arg-${Date.now()}-${Math.random()}`,
+        p1: arg.premise1,
+        p2: arg.premise2,
+        conc: arg.conclusion,
+        ans: arg.isValid ? 'Valid' : 'Invalid',
+        exp: arg.explanation,
+        ai: true
+      }));
+      
+      setAiExtraArguments((prev) => [...prev, ...playable]);
+      showToast(`✨ Successfully added ${playable.length} AI arguments!`);
+      
+      if (isLaunch) {
+        setActiveLesson('argument');
+        setArgumentIndex(0);
+        setArgumentScore(0);
+        setSelectedArgumentOption(null);
+        setShowArgumentHint(false);
+        setShowArgumentFeedback(false);
+        setScreen('argumentGame');
+      }
+    } catch (err) {
+      showToast('❌ Failed to generate AI arguments.');
+    }
   };
 
   // --------------------------------------------------------------------------
@@ -2442,11 +3307,93 @@ export default function App() {
     }
   };
 
-  const handleAppendAIFallacies = () => {
-    const newItems = generateAIFallacies(6);
-    setAiExtraFallacies((prev) => [...prev, ...newItems]);
-    setFallacyIndex(activeFallacies.length);
-    setScreen('fallacyGame');
+  const handleAppendAIFallacies = async (countArg?: any, launchImmediately = false) => {
+    const count = typeof countArg === 'number' && !isNaN(countArg) && countArg > 0 ? countArg : 6;
+    const isLaunch = typeof countArg === 'boolean' ? countArg : Boolean(launchImmediately);
+    showToast(`🤖 Generating ${count} AI fallacies...`);
+
+    try {
+      const res = await fetch('/api/ai/generate-fallacies', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count })
+      });
+      const data = await res.json();
+      const playable: FallacyItem[] = data.fallacies.map((f: any) => ({
+        id: `ai-fal-${Date.now()}-${Math.random()}`,
+        text: f.text,
+        ans: f.fallacyName,
+        exp: f.explanation,
+        ai: true
+      }));
+
+      setAiExtraFallacies((prev) => [...prev, ...playable]);
+      showToast(`✨ Successfully added ${playable.length} AI fallacies!`);
+
+      if (isLaunch) {
+        setActiveLesson('fallacy');
+        setFallacyIndex(0);
+        setFallacyScore(0);
+        setSelectedFallacyOption(null);
+        setShowFallacyHint(false);
+        setShowFallacyFeedback(false);
+        setScreen('fallacyGame');
+      }
+    } catch (err) {
+      showToast('❌ Failed to generate AI fallacies.');
+    }
+  };
+
+  const handleGenerateAll6Apps = async () => {
+    showToast('🚀 Generating fresh AI content for ALL 6 modules...');
+    try {
+      await Promise.all([
+        handleAppendAITrueFalse(10, false),
+        handleAppendAIVenn(6, false),
+        handleAppendAIPatterns(10, false),
+        handleAppendAIDecisions(8, false),
+        handleAppendAIArguments(6, false),
+        handleAppendAIFallacies(6, false)
+      ]);
+      showToast('✅ All modules updated with new AI challenges!');
+    } catch (err) {
+      showToast('❌ One or more modules failed to generate.');
+    }
+  };
+
+  const handleAutoGenerateCreateExample = () => {
+    if (createActiveTab === 'argument') {
+      const sample = generateAIArguments(1)[0];
+      setCreateStatementInput(`Premise 1: ${sample.premise1}\nPremise 2: ${sample.premise2}\nConclusion: ${sample.ans}`);
+      setCreateAnswerChoice('TRUE');
+      setCreateAiGuidance(`✨ Auto-generated argument: ${sample.exp}`);
+    } else if (createActiveTab === 'fallacy') {
+      const sample = generateAIFallacies(1)[0];
+      setCreateStatementInput(sample.statement);
+      setCreateAnswerChoice('FALSE');
+      setCreateAiGuidance(`✨ Auto-generated fallacy: ${sample.exp}`);
+    } else if (createActiveTab === 'pattern') {
+      const sample = generateAIPatterns(1)[0];
+      setCreateStatementInput(`Sequence: ${sample.seq.join(', ')}... Proposed next number: ${sample.answer}`);
+      setCreateAnswerChoice('TRUE');
+      setCreateAiGuidance(`✨ Auto-generated pattern: Rule is "${sample.rule}".`);
+    } else if (createActiveTab === 'decision') {
+      const sample = generateAIDecisions(1)[0];
+      const best = sample.options.find(o => o.best)?.name || sample.options[0].name;
+      setCreateStatementInput(`Scenario: ${sample.title} - ${sample.story}\nBest strategic choice: ${best}`);
+      setCreateAnswerChoice('TRUE');
+      setCreateAiGuidance(`✨ Auto-generated dilemma: ${sample.explanation}`);
+    } else if (createActiveTab === 'venn') {
+      const sample = generateAIVenn(1)[0];
+      setCreateStatementInput(`${sample.questions[0].q}`);
+      setCreateAnswerChoice(sample.questions[0].a);
+      setCreateAiGuidance(`✨ Auto-generated Venn statement: Overlap between ${sample.left} & ${sample.right}.`);
+    } else {
+      const sample = generateAITrueFalse(1)[0];
+      setCreateStatementInput(sample.text);
+      setCreateAnswerChoice(sample.answer);
+      setCreateAiGuidance(`✨ Auto-generated statement: ${sample.explanation}`);
+    }
   };
 
   // --------------------------------------------------------------------------
@@ -2667,16 +3614,39 @@ export default function App() {
     }
   };
 
+  // Combine local and cloud learners for the Teacher Monitor
+  const consolidatedLearners = useMemo(() => {
+    const map = new Map<string, any>();
+    
+    // 1. Add cloud learners (highest priority/authority)
+    cloudLearners.forEach(cl => {
+      map.set(String(cl.id), {
+        ...cl,
+        id: Number(cl.id) || cl.id
+      });
+    });
+
+    // 2. Add local learners (if not already in cloud map)
+    allLearners.forEach(al => {
+      const sid = String(al.id);
+      if (!map.has(sid)) {
+        map.set(sid, al);
+      }
+    });
+
+    return Array.from(map.values());
+  }, [allLearners, cloudLearners]);
+
   // Sorted Learners: Struggling first
   const sortedLearners = useMemo(() => {
-    return [...allLearners].sort((a, b) => a.avg - b.avg);
-  }, [allLearners]);
+    return [...consolidatedLearners].sort((a, b) => (a.avg || 0) - (b.avg || 0));
+  }, [consolidatedLearners]);
 
   // Overall most common weak area calculation
   const overallMostCommonWeakArea = useMemo(() => {
     const frequencyMap: Record<string, number> = {};
-    allLearners.forEach((lr) => {
-      lr.weak.forEach((w) => {
+    consolidatedLearners.forEach((lr) => {
+      (lr.weak || []).forEach((w: string) => {
         frequencyMap[w] = (frequencyMap[w] || 0) + 1;
       });
     });
@@ -2722,6 +3692,7 @@ export default function App() {
     const headers = [
       'Name',
       'Overall Avg (%)',
+      'Daily Streak (Days)',
       'Lesson 1 (TF) Avg',
       'Lesson 2 (Venn) Avg',
       'Lesson 3 (Pattern) Avg',
@@ -2735,14 +3706,17 @@ export default function App() {
 
     const rows = sortedLearners.map((lr) => {
       const getLessonAvg = (modeName: string) => {
-        const matches = lr.scores.filter((s) => s.mode === modeName);
+        const matches = lr.scores.filter((s: any) => s.mode === modeName);
         if (matches.length === 0) return 'N/A';
-        return Math.round(matches.reduce((a, b) => a + b.pct, 0) / matches.length) + '%';
+        return Math.round(matches.reduce((a: number, b: any) => a + b.pct, 0) / matches.length) + '%';
       };
+
+      const learnerStreak = getEffectiveStreak(lr).streak;
 
       return [
         `"${lr.name.replace(/"/g, '""')}"`,
         lr.scores.length > 0 ? `${lr.avg}%` : 'N/A',
+        learnerStreak,
         getLessonAvg('truefalse'),
         getLessonAvg('venn'),
         getLessonAvg('pattern'),
@@ -2782,12 +3756,24 @@ export default function App() {
       localStorage.removeItem('decisionProgress');
       localStorage.removeItem('logicmaster_overlooked_factors');
       localStorage.removeItem('myQuestions');
+      localStorage.removeItem('logicmaster_ai_extra_truefalse');
+      localStorage.removeItem('logicmaster_ai_extra_venn');
+      localStorage.removeItem('logicmaster_ai_extra_patterns');
+      localStorage.removeItem('logicmaster_ai_extra_decisions');
+      localStorage.removeItem('logicmaster_ai_extra_arguments');
+      localStorage.removeItem('logicmaster_ai_extra_fallacies');
       setAllLearners([]);
       setHistoricalWrong([]);
       setWrongAnswers([]);
       setSavedUserQuestions([]);
       setMasteredPatternTypes([]);
       setOverlookedFactorsLog([]);
+      setAiExtraTrueFalse([]);
+      setAiExtraVenn([]);
+      setAiExtraPatterns([]);
+      setAiExtraDecisions([]);
+      setAiExtraArguments([]);
+      setAiExtraFallacies([]);
       setCurrentLearner(null);
       handleLockTeacher();
     }
@@ -2796,8 +3782,8 @@ export default function App() {
   // Decision Maker Diagnostic Statistics (Avg & Overlooked Factor)
   const decisionStats = useMemo(() => {
     const allDecScores: number[] = [];
-    allLearners.forEach((lr) => {
-      lr.scores.forEach((sc) => {
+    consolidatedLearners.forEach((lr) => {
+      (lr.scores || []).forEach((sc: any) => {
         if (sc.mode === 'decision') {
           allDecScores.push(sc.pct);
         }
@@ -2813,8 +3799,8 @@ export default function App() {
       factorCounts[f] = (factorCounts[f] || 0) + 1;
     });
 
-    allLearners.forEach((lr) => {
-      lr.weak.forEach((w) => {
+    consolidatedLearners.forEach((lr) => {
+      (lr.weak || []).forEach((w: string) => {
         if (w.startsWith('Ignores ')) {
           const factorName = w.replace('Ignores ', '');
           factorCounts[factorName] = (factorCounts[factorName] || 0) + 1;
@@ -2881,7 +3867,8 @@ export default function App() {
   // ==========================================================================
   // RENDER: TEACHER DASHBOARD (DEDICATED FULL SCREEN WITH 4 LESSON COLUMNS)
   // ==========================================================================
-  if (screen === 'teacherDashboard') {
+  const renderScreenContent = () => {
+    if (screen === 'teacherDashboard') {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col justify-between max-w-4xl mx-auto shadow-sm">
         <div className="p-4 sm:p-6 flex-1 flex flex-col justify-between">
@@ -2996,6 +3983,7 @@ export default function App() {
                         <tr>
                           <th className="py-2.5 px-3">Name</th>
                           <th className="py-2.5 px-2">Overall</th>
+                          <th className="py-2.5 px-2">Streak</th>
                           <th className="py-2.5 px-2">L1: TF</th>
                           <th className="py-2.5 px-2">L2: Venn</th>
                           <th className="py-2.5 px-2">L3: Pattern</th>
@@ -3010,10 +3998,11 @@ export default function App() {
                       <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
                         {sortedLearners.map((lr) => {
                           const isStruggling = lr.scores.length > 0 && lr.avg < 50;
+                          const lrStreak = getEffectiveStreak(lr);
                           const getAvgByMode = (m: string) => {
-                            const found = lr.scores.filter(s => s.mode === m);
+                            const found = lr.scores.filter((s: any) => s.mode === m);
                             if (found.length === 0) return '—';
-                            return Math.round(found.reduce((a, b) => a + b.pct, 0) / found.length) + '%';
+                            return Math.round(found.reduce((a: number, b: any) => a + b.pct, 0) / found.length) + '%';
                           };
 
                           return (
@@ -3030,6 +4019,16 @@ export default function App() {
                               </td>
                               <td className={`py-2.5 px-2 font-black ${isStruggling ? 'text-red-600' : 'text-emerald-700'}`}>
                                 {lr.scores.length > 0 ? `${lr.avg}%` : 'N/A'}
+                              </td>
+                              <td className="py-2.5 px-2 font-bold text-orange-700">
+                                {lrStreak.streak > 0 ? (
+                                  <span className="inline-flex items-center gap-0.5 bg-orange-50 text-orange-800 border border-orange-200 px-1.5 py-0.5 rounded-md text-[10px]">
+                                    <span>{lrStreak.streak}d</span>
+                                    <span>🔥</span>
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">0d</span>
+                                )}
                               </td>
                               <td className="py-2.5 px-2 text-slate-700 font-semibold">{getAvgByMode('truefalse')}</td>
                               <td className="py-2.5 px-2 text-slate-700 font-semibold">{getAvgByMode('venn')}</td>
@@ -3135,6 +4134,29 @@ export default function App() {
               <ArrowRight className="w-5 h-5" />
             </button>
 
+            <div className="relative my-6">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-200"></div>
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-white px-2 text-slate-500 font-bold tracking-widest">CLOUD SYNC</span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={async () => {
+                const u = await signInWithGoogle();
+                if (u) {
+                  setLoginNameInput(u.displayName || '');
+                }
+              }}
+              className="w-full h-14 bg-white hover:bg-slate-50 text-slate-700 border-2 border-slate-200 font-black rounded-xl shadow-sm active:scale-[0.98] transition flex items-center justify-center gap-3"
+            >
+              <Globe className="w-5 h-5 text-blue-500" />
+              <span>{user ? 'LINKED: ' + (user.displayName || 'ACCOUNT').toUpperCase() : 'SIGN IN WITH GOOGLE'}</span>
+            </button>
+
             {allLearners.length > 0 && (
               <div className="pt-3 border-t border-slate-100">
                 <p className="text-xs font-semibold text-slate-500 mb-2">Or select saved learner:</p>
@@ -3161,19 +4183,6 @@ export default function App() {
         </div>
 
         <AppFooter onTriggerHiddenTeacher={() => setShowPinModal(true)} />
-
-        <TeacherPinModal
-          isOpen={showPinModal}
-          onClose={() => {
-            setShowPinModal(false);
-            setPinInput('');
-            setPinError('');
-          }}
-          pinInput={pinInput}
-          setPinInput={setPinInput}
-          pinError={pinError}
-          onUnlock={handleUnlockTeacher}
-        />
       </div>
     );
   }
@@ -3206,197 +4215,419 @@ export default function App() {
                 Week 1, Week 2 &amp; Week 3 Core Learning Modules
               </p>
             </div>
+
+            {/* Prominent Daily Streak Counter in Header */}
+            <div className="flex flex-col items-end shrink-0">
+              <div
+                className={`px-3 py-1.5 rounded-2xl flex items-center gap-2 border shadow-xs transition-all ${
+                  effectiveStreak.isActiveToday
+                    ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white border-amber-400 shadow-orange-100'
+                    : effectiveStreak.streak > 0
+                    ? 'bg-amber-50 text-amber-950 border-amber-300'
+                    : 'bg-slate-100 text-slate-600 border-slate-200'
+                }`}
+                title={`Daily Streak: ${effectiveStreak.streak} consecutive days completed`}
+              >
+                <Flame className={`w-5 h-5 ${effectiveStreak.isActiveToday ? 'text-amber-200 animate-bounce' : effectiveStreak.streak > 0 ? 'text-orange-500' : 'text-slate-400'}`} />
+                <div className="text-right leading-none">
+                  <div className="flex items-baseline gap-1 justify-end">
+                    <span className="text-lg font-black tracking-tight">{effectiveStreak.streak}</span>
+                    <span className="text-[10px] font-extrabold uppercase tracking-wide">
+                      {effectiveStreak.streak === 1 ? 'DAY' : 'DAYS'}
+                    </span>
+                  </div>
+                  <div className="text-[8px] font-black uppercase tracking-wider mt-0.5 opacity-90">
+                    {effectiveStreak.isActiveToday ? 'ACTIVE TODAY' : effectiveStreak.streak > 0 ? 'EXTEND TODAY' : 'START STREAK'}
+                  </div>
+                </div>
+              </div>
+              {effectiveStreak.bestStreak > 0 && (
+                <span className="text-[9px] font-bold text-amber-800 mt-0.5">
+                  Best: {effectiveStreak.bestStreak} {effectiveStreak.bestStreak === 1 ? 'day' : 'days'} 🏆
+                </span>
+              )}
+            </div>
           </header>
 
+          {/* AI Question Generator Hub Hero Banner */}
+          <div className="mb-2 bg-gradient-to-r from-purple-800 via-indigo-900 to-emerald-850 text-white p-3.5 rounded-2xl shadow-sm border border-purple-400/30 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0 border border-white/20">
+                <Sparkles className="w-5 h-5 text-amber-300 animate-pulse" />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-[9px] font-black tracking-wider uppercase bg-amber-400 text-purple-950 px-1.5 py-0.5 rounded font-black">
+                    UNLIMITED
+                  </span>
+                  <h2 className="text-xs sm:text-sm font-black text-white truncate">
+                    AI Question Generator
+                  </h2>
+                </div>
+                <p className="text-[11px] text-purple-100 font-medium leading-tight mt-0.5">
+                  Generate unlimited logic problems across all 6 SHS modules
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0 self-end sm:flex-row sm:self-center">
+              <button
+                onClick={handleGenerateAll6Apps}
+                className="px-3 py-2 bg-gradient-to-r from-amber-400 to-orange-400 hover:from-amber-300 hover:to-orange-300 text-purple-950 active:scale-95 text-xs font-black rounded-xl shadow-xs transition flex items-center justify-center gap-1"
+                title="Generate fresh questions for all 6 modules immediately"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-950" />
+                <span>+46 All Apps 🚀</span>
+              </button>
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="px-3 py-2 bg-white hover:bg-purple-100 text-purple-950 active:scale-95 text-xs font-black rounded-xl shadow-xs transition flex items-center justify-center gap-1"
+                title="Open AI Question Generator Hub modal"
+              >
+                <span>AI Hub</span>
+                <ChevronRight className="w-3.5 h-3.5 stroke-[3]" />
+              </button>
+            </div>
+          </div>
+
+          {/* Prominent Daily Streak Motivation Banner & 7-Day Activity Tracker */}
+          <div className="my-2 p-3 rounded-2xl bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 text-white shadow-sm border border-amber-400/40">
+            <div className="flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-white/20 backdrop-blur-xs flex items-center justify-center shrink-0 border border-white/30 shadow-2xs">
+                  <Flame className="w-6 h-6 text-amber-200 animate-pulse" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[9px] font-black tracking-wider uppercase bg-white text-orange-950 px-1.5 py-0.5 rounded shadow-2xs">
+                      DAILY STREAK
+                    </span>
+                    <h2 className="text-xs sm:text-sm font-black text-white truncate">
+                      {effectiveStreak.isActiveToday
+                        ? `${effectiveStreak.streak}-Day Streak Active! 🎉`
+                        : effectiveStreak.streak > 0
+                        ? `${effectiveStreak.streak}-Day Streak at Risk! ⚡`
+                        : 'Start Your Daily Streak Today! 🎯'}
+                    </h2>
+                  </div>
+                  <p className="text-[11px] text-amber-100 font-medium leading-tight mt-0.5">
+                    {effectiveStreak.isActiveToday
+                      ? 'Awesome work! You completed reasoning practice today. Come back tomorrow to keep the flame alive!'
+                      : effectiveStreak.streak > 0
+                      ? 'Complete any lesson below today to keep your consecutive days streak going!'
+                      : 'Complete any of the 6 lessons below to ignite your 1st daily logic streak!'}
+                  </p>
+                </div>
+              </div>
+              <div className="text-right shrink-0 bg-white/15 px-2.5 py-1 rounded-xl border border-white/25">
+                <span className="text-xl font-black text-white block leading-none">
+                  {effectiveStreak.streak}
+                </span>
+                <span className="text-[8px] font-bold text-amber-100 uppercase tracking-tighter">
+                  {effectiveStreak.streak === 1 ? 'Day' : 'Days'}
+                </span>
+              </div>
+            </div>
+
+            {/* 7-Day Weekly Streak Dots */}
+            <div className="mt-2 pt-2 border-t border-white/20 flex items-center justify-between text-[10px] font-bold text-amber-100">
+              <span className="text-[10px] text-white/90 font-bold">Past 7 Days Practice:</span>
+              <div className="flex items-center gap-1.5">
+                {weeklyStreakDays.map((d, idx) => (
+                  <div
+                    key={idx}
+                    className={`flex flex-col items-center gap-0.5 ${d.isToday ? 'scale-110 font-black' : ''}`}
+                    title={`${d.label}: ${d.completed ? 'Lesson completed' : 'No lesson completed'}`}
+                  >
+                    <div
+                      className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] transition-all ${
+                        d.completed
+                          ? 'bg-white text-orange-600 font-black shadow-xs ring-2 ring-white/50'
+                          : d.isToday
+                          ? 'border-2 border-dashed border-white text-white/90 bg-white/10'
+                          : 'bg-white/20 text-white/50'
+                      }`}
+                    >
+                      {d.completed ? '🔥' : '·'}
+                    </div>
+                    <span className="text-[8px] uppercase tracking-tighter text-white/80">
+                      {d.shortDay}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
           {/* 3 ROWS (Week 1 L1 L2, Week 2 L3 L4, Week 3 L5 L6 - 140px height, icon 32px, title 18px bold) */}
-          <main className="my-3 space-y-2.5">
+          <main className="my-2 space-y-2.5">
             {/* ROW 1: Week 1 Foundations */}
             <div className="grid grid-cols-2 gap-2.5">
               {/* Card 1: TRUE/FALSE Lesson 1 */}
-              <button
-                onClick={() => startLesson('truefalse')}
-                className="h-[140px] p-3.5 bg-white hover:bg-emerald-50/50 active:scale-[0.98] border-2 border-emerald-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-emerald-200 focus:outline-none transition-all group"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-2xl">🎮</span>
-                  <span className="text-[10px] font-extrabold text-emerald-800 uppercase px-1.5 py-0.5 bg-emerald-100 rounded">
-                    L1
-                  </span>
-                </div>
-                <div>
-                  <h2 className="text-[18px] font-bold text-[#212121] leading-tight group-hover:text-emerald-800">
-                    TRUE/FALSE
-                  </h2>
-                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
-                    17 Statements
-                  </p>
-                </div>
-              </button>
+              <div className="relative group">
+                <button
+                  onClick={() => startLesson('truefalse')}
+                  className="w-full h-[142px] p-3.5 bg-white hover:bg-emerald-50/50 active:scale-[0.98] border-2 border-emerald-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-emerald-200 focus:outline-none transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-2xl">🎮</span>
+                    <span className="text-[10px] font-extrabold text-emerald-800 uppercase px-1.5 py-0.5 bg-emerald-100 rounded">
+                      L1
+                    </span>
+                  </div>
+                  <div>
+                    <h2 className="text-[17px] font-bold text-[#212121] leading-tight group-hover:text-emerald-800">
+                      TRUE/FALSE
+                    </h2>
+                    <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                      {17 + aiExtraTrueFalse.length} Statements {aiExtraTrueFalse.length > 0 ? `(+${aiExtraTrueFalse.length} AI)` : ''}
+                    </p>
+                  </div>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAppendAITrueFalse(10, true);
+                  }}
+                  className="absolute bottom-2.5 right-2.5 px-2.5 py-1 bg-emerald-100 hover:bg-emerald-200 text-emerald-900 border border-emerald-300 rounded-lg text-[10px] font-black flex items-center gap-1 shadow-2xs z-10 active:scale-95 transition"
+                  title="Generate 10 AI Questions & Play"
+                >
+                  <Sparkles className="w-3 h-3 text-emerald-700 animate-pulse" />
+                  <span>+10 AI</span>
+                </button>
+              </div>
 
               {/* Card 2: Venn Lesson 2 */}
-              <button
-                onClick={() => startLesson('venn')}
-                className="h-[140px] p-3.5 bg-white hover:bg-amber-50/50 active:scale-[0.98] border-2 border-amber-500 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-amber-200 focus:outline-none transition-all group"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-2xl">⭕</span>
-                  <span className="text-[10px] font-extrabold text-amber-800 uppercase px-1.5 py-0.5 bg-amber-100 rounded">
-                    L2
-                  </span>
-                </div>
-                <div>
-                  <h2 className="text-[18px] font-bold text-[#212121] leading-tight group-hover:text-amber-900">
-                    Venn Diagram
-                  </h2>
-                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
-                    Overlaps &amp; Sets
-                  </p>
-                </div>
-              </button>
+              <div className="relative group">
+                <button
+                  onClick={() => startLesson('venn')}
+                  className="w-full h-[142px] p-3.5 bg-white hover:bg-amber-50/50 active:scale-[0.98] border-2 border-amber-500 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-amber-200 focus:outline-none transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-2xl">⭕</span>
+                    <span className="text-[10px] font-extrabold text-amber-800 uppercase px-1.5 py-0.5 bg-amber-100 rounded">
+                      L2
+                    </span>
+                  </div>
+                  <div>
+                    <h2 className="text-[17px] font-bold text-[#212121] leading-tight group-hover:text-amber-900">
+                      Venn Diagram
+                    </h2>
+                    <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                      {6 + aiExtraVenn.length} Sets {aiExtraVenn.length > 0 ? `(+${aiExtraVenn.length} AI)` : ''}
+                    </p>
+                  </div>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAppendAIVenn(6, true);
+                  }}
+                  className="absolute bottom-2.5 right-2.5 px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-950 border border-amber-300 rounded-lg text-[10px] font-black flex items-center gap-1 shadow-2xs z-10 active:scale-95 transition"
+                  title="Generate 6 AI Venn Sets & Play"
+                >
+                  <Sparkles className="w-3 h-3 text-amber-700 animate-pulse" />
+                  <span>+6 AI</span>
+                </button>
+              </div>
             </div>
 
             {/* ROW 2: Week 2 Sequences & Decisions */}
             <div className="grid grid-cols-2 gap-2.5">
               {/* Card 3: Pattern Master Lesson 3 (Week 2) */}
-              <button
-                onClick={() => startLesson('pattern')}
-                className="h-[140px] p-3.5 bg-white hover:bg-blue-50/50 active:scale-[0.98] border-2 border-blue-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-blue-200 focus:outline-none transition-all group"
-              >
-                <div className="flex items-center justify-between">
-                  <Binary className="w-8 h-8 text-blue-600" />
-                  <span className="text-[10px] font-extrabold text-blue-800 uppercase px-1.5 py-0.5 bg-blue-100 rounded">
-                    L3
-                  </span>
-                </div>
-                <div>
-                  <h2 className="text-[18px] font-bold text-[#212121] leading-tight group-hover:text-blue-900">
-                    Pattern Master
-                  </h2>
-                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
-                    10 Numerical Sequences
-                  </p>
-                </div>
-              </button>
+              <div className="relative group">
+                <button
+                  onClick={() => startLesson('pattern')}
+                  className="w-full h-[142px] p-3.5 bg-white hover:bg-blue-50/50 active:scale-[0.98] border-2 border-blue-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-blue-200 focus:outline-none transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <Binary className="w-8 h-8 text-blue-600" />
+                    <span className="text-[10px] font-extrabold text-blue-800 uppercase px-1.5 py-0.5 bg-blue-100 rounded">
+                      L3
+                    </span>
+                  </div>
+                  <div>
+                    <h2 className="text-[17px] font-bold text-[#212121] leading-tight group-hover:text-blue-900">
+                      Pattern Master
+                    </h2>
+                    <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                      {10 + aiExtraPatterns.length} Sequences {aiExtraPatterns.length > 0 ? `(+${aiExtraPatterns.length} AI)` : ''}
+                    </p>
+                  </div>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAppendAIPatterns(10, true);
+                  }}
+                  className="absolute bottom-2.5 right-2.5 px-2.5 py-1 bg-blue-100 hover:bg-blue-200 text-blue-950 border border-blue-300 rounded-lg text-[10px] font-black flex items-center gap-1 shadow-2xs z-10 active:scale-95 transition"
+                  title="Generate 10 AI Patterns & Play"
+                >
+                  <Sparkles className="w-3 h-3 text-blue-700 animate-pulse" />
+                  <span>+10 AI</span>
+                </button>
+              </div>
 
               {/* Card 4: Decision Maker Lesson 4 (Week 2) */}
-              <button
-                onClick={() => startLesson('decision')}
-                className="h-[140px] p-3.5 bg-white hover:bg-violet-50/50 active:scale-[0.98] border-2 border-violet-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-violet-200 focus:outline-none transition-all group"
-              >
-                <div className="flex items-center justify-between">
-                  <BrainCircuit className="w-8 h-8 text-violet-600" />
-                  <span className="text-[10px] font-extrabold text-violet-800 uppercase px-1.5 py-0.5 bg-violet-100 rounded">
-                    L4
-                  </span>
-                </div>
-                <div>
-                  <h2 className="text-[18px] font-bold text-[#212121] leading-tight group-hover:text-violet-900">
-                    Decision Maker
-                  </h2>
-                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
-                    12 Real-life Scenarios
-                  </p>
-                </div>
-              </button>
+              <div className="relative group">
+                <button
+                  onClick={() => startLesson('decision')}
+                  className="w-full h-[142px] p-3.5 bg-white hover:bg-violet-50/50 active:scale-[0.98] border-2 border-violet-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-violet-200 focus:outline-none transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <BrainCircuit className="w-8 h-8 text-violet-600" />
+                    <span className="text-[10px] font-extrabold text-violet-800 uppercase px-1.5 py-0.5 bg-violet-100 rounded">
+                      L4
+                    </span>
+                  </div>
+                  <div>
+                    <h2 className="text-[17px] font-bold text-[#212121] leading-tight group-hover:text-violet-900">
+                      Decision Maker
+                    </h2>
+                    <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                      {12 + aiExtraDecisions.length} Scenarios {aiExtraDecisions.length > 0 ? `(+${aiExtraDecisions.length} AI)` : ''}
+                    </p>
+                  </div>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAppendAIDecisions(8, true);
+                  }}
+                  className="absolute bottom-2.5 right-2.5 px-2.5 py-1 bg-violet-100 hover:bg-violet-200 text-violet-950 border border-violet-300 rounded-lg text-[10px] font-black flex items-center gap-1 shadow-2xs z-10 active:scale-95 transition"
+                  title="Generate 8 AI Scenarios & Play"
+                >
+                  <Sparkles className="w-3 h-3 text-violet-700 animate-pulse" />
+                  <span>+8 AI</span>
+                </button>
+              </div>
             </div>
 
             {/* ROW 3: Week 3 Arguments & Fallacies */}
             <div className="grid grid-cols-2 gap-2.5">
               {/* Card 5: Argument Builder Lesson 5 (Week 3) */}
-              <button
-                onClick={() => startLesson('argument')}
-                className="h-[140px] p-3.5 bg-white hover:bg-indigo-50/50 active:scale-[0.98] border-2 border-indigo-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-indigo-200 focus:outline-none transition-all group"
-              >
-                <div className="flex items-center justify-between">
-                  <Scale className="w-8 h-8 text-indigo-600" />
-                  <span className="text-[10px] font-extrabold text-indigo-800 uppercase px-1.5 py-0.5 bg-indigo-100 rounded">
-                    L5
-                  </span>
-                </div>
-                <div>
-                  <h2 className="text-[18px] font-bold text-[#212121] leading-tight group-hover:text-indigo-900">
-                    Argument Builder
-                  </h2>
-                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
-                    If-Then &amp; Syllogisms
-                  </p>
-                </div>
-              </button>
+              <div className="relative group">
+                <button
+                  onClick={() => startLesson('argument')}
+                  className="w-full h-[142px] p-3.5 bg-white hover:bg-indigo-50/50 active:scale-[0.98] border-2 border-indigo-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-indigo-200 focus:outline-none transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <Scale className="w-8 h-8 text-indigo-600" />
+                    <span className="text-[10px] font-extrabold text-indigo-800 uppercase px-1.5 py-0.5 bg-indigo-100 rounded">
+                      L5
+                    </span>
+                  </div>
+                  <div>
+                    <h2 className="text-[17px] font-bold text-[#212121] leading-tight group-hover:text-indigo-900">
+                      Argument Builder
+                    </h2>
+                    <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                      {6 + aiExtraArguments.length} Arguments {aiExtraArguments.length > 0 ? `(+${aiExtraArguments.length} AI)` : ''}
+                    </p>
+                  </div>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAppendAIArguments(6, true);
+                  }}
+                  className="absolute bottom-2.5 right-2.5 px-2.5 py-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-950 border border-indigo-300 rounded-lg text-[10px] font-black flex items-center gap-1 shadow-2xs z-10 active:scale-95 transition"
+                  title="Generate 6 AI Arguments & Play"
+                >
+                  <Sparkles className="w-3 h-3 text-indigo-700 animate-pulse" />
+                  <span>+6 AI</span>
+                </button>
+              </div>
 
               {/* Card 6: Spot the Fallacy Lesson 6 (Week 3) */}
-              <button
-                onClick={() => startLesson('fallacy')}
-                className="h-[140px] p-3.5 bg-white hover:bg-rose-50/50 active:scale-[0.98] border-2 border-rose-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-rose-200 focus:outline-none transition-all group"
-              >
-                <div className="flex items-center justify-between">
-                  <SearchCheck className="w-8 h-8 text-rose-600" />
-                  <span className="text-[10px] font-extrabold text-rose-800 uppercase px-1.5 py-0.5 bg-rose-100 rounded">
-                    L6
-                  </span>
-                </div>
-                <div>
-                  <h2 className="text-[18px] font-bold text-[#212121] leading-tight group-hover:text-rose-900">
-                    Spot the Fallacy
-                  </h2>
-                  <p className="text-[11px] text-slate-500 font-medium mt-0.5">
-                    Ghana Fallacy Detector
-                  </p>
-                </div>
-              </button>
+              <div className="relative group">
+                <button
+                  onClick={() => startLesson('fallacy')}
+                  className="w-full h-[142px] p-3.5 bg-white hover:bg-rose-50/50 active:scale-[0.98] border-2 border-rose-600 rounded-2xl shadow-xs text-left flex flex-col justify-between focus:ring-4 focus:ring-rose-200 focus:outline-none transition-all"
+                >
+                  <div className="flex items-center justify-between">
+                    <SearchCheck className="w-8 h-8 text-rose-600" />
+                    <span className="text-[10px] font-extrabold text-rose-800 uppercase px-1.5 py-0.5 bg-rose-100 rounded">
+                      L6
+                    </span>
+                  </div>
+                  <div>
+                    <h2 className="text-[17px] font-bold text-[#212121] leading-tight group-hover:text-rose-900">
+                      Spot the Fallacy
+                    </h2>
+                    <p className="text-[11px] text-slate-500 font-medium mt-0.5">
+                      {6 + aiExtraFallacies.length} Fallacies {aiExtraFallacies.length > 0 ? `(+${aiExtraFallacies.length} AI)` : ''}
+                    </p>
+                  </div>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleAppendAIFallacies(6, true);
+                  }}
+                  className="absolute bottom-2.5 right-2.5 px-2.5 py-1 bg-rose-100 hover:bg-rose-200 text-rose-950 border border-rose-300 rounded-lg text-[10px] font-black flex items-center gap-1 shadow-2xs z-10 active:scale-95 transition"
+                  title="Generate 6 AI Fallacies & Play"
+                >
+                  <Sparkles className="w-3 h-3 text-rose-700 animate-pulse" />
+                  <span>+6 AI</span>
+                </button>
+              </div>
             </div>
 
-            {/* Bottom Row: 2 Cards (Challenge Arena & Create Your Own) */}
-            <div className="grid grid-cols-2 gap-2.5 pt-1">
+            {/* Bottom Row: 3 Action Cards */}
+            <div className="grid grid-cols-3 gap-2 pt-1">
               <button
                 onClick={() => setScreen('challengeSetup')}
-                className="p-3 bg-indigo-50 hover:bg-indigo-100/80 border border-indigo-200 rounded-xl text-left flex items-center gap-2.5 transition-all"
+                className="p-2.5 bg-indigo-50 hover:bg-indigo-100/80 border border-indigo-200 rounded-xl text-left flex flex-col justify-between transition-all"
               >
-                <span className="text-xl">⚔️</span>
+                <span className="text-lg">⚔️</span>
                 <div>
-                  <h3 className="text-xs font-bold text-indigo-950">Challenge Arena</h3>
-                  <p className="text-[10px] text-indigo-700">1v1 &amp; Bot Battle</p>
+                  <h3 className="text-[11px] font-bold text-indigo-950 leading-tight">Arena</h3>
+                  <p className="text-[9px] text-indigo-700">1v1 / Bot</p>
                 </div>
               </button>
 
               <button
                 onClick={() => setScreen('create')}
-                className="p-3 bg-purple-50 hover:bg-purple-100/80 border border-purple-200 rounded-xl text-left flex items-center gap-2.5 transition-all"
+                className="p-2.5 bg-purple-50 hover:bg-purple-100/80 border border-purple-200 rounded-xl text-left flex flex-col justify-between transition-all"
               >
-                <span className="text-xl">✏️</span>
+                <span className="text-lg">✏️</span>
                 <div>
-                  <h3 className="text-xs font-bold text-purple-950">Create Your Own</h3>
-                  <p className="text-[10px] text-purple-700">AI Logic Studio</p>
+                  <h3 className="text-[11px] font-bold text-purple-950 leading-tight">Create</h3>
+                  <p className="text-[9px] text-purple-700">Author Logic</p>
+                </div>
+              </button>
+
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="p-2.5 bg-amber-50 hover:bg-amber-100/80 border border-amber-300 rounded-xl text-left flex flex-col justify-between transition-all"
+              >
+                <span className="text-lg">⚡</span>
+                <div>
+                  <h3 className="text-[11px] font-bold text-amber-950 leading-tight">AI Hub</h3>
+                  <p className="text-[9px] text-amber-700">6 Modules</p>
                 </div>
               </button>
             </div>
           </main>
 
-          {/* Quick Stats banner */}
-          {currentLearner && currentLearner.scores.length > 0 && (
-            <div className="p-2.5 bg-white rounded-xl border border-slate-200 flex items-center justify-between text-xs font-semibold text-slate-700 mb-1">
-              <span>Avg: <strong className="text-emerald-800">{currentLearner.avg}%</strong></span>
-              <span>Attempts: <strong>{currentLearner.scores.length}</strong></span>
-              {currentLearner.weak.length > 0 && (
-                <span className="text-red-700 truncate max-w-[120px]">Focus: {currentLearner.weak[0]}</span>
-              )}
-            </div>
-          )}
+          {/* Quick Stats banner with Daily Streak */}
+          <div className="p-2.5 bg-white rounded-xl border border-slate-200 flex items-center justify-between text-xs font-semibold text-slate-700 mb-1">
+            <span className="flex items-center gap-1.5">
+              <Flame className="w-4 h-4 text-orange-500" />
+              <span>Streak: <strong className="text-orange-600 font-black">{effectiveStreak.streak} {effectiveStreak.streak === 1 ? 'day' : 'days'}</strong></span>
+            </span>
+            {currentLearner && currentLearner.scores.length > 0 ? (
+              <>
+                <span>Avg: <strong className="text-emerald-800">{currentLearner.avg}%</strong></span>
+                <span>Attempts: <strong>{currentLearner.scores.length}</strong></span>
+              </>
+            ) : (
+              <span className="text-slate-500 text-[11px]">Complete a lesson to ignite stats!</span>
+            )}
+          </div>
         </div>
 
         <AppFooter onTriggerHiddenTeacher={() => setShowPinModal(true)} />
-
-        <TeacherPinModal
-          isOpen={showPinModal}
-          onClose={() => {
-            setShowPinModal(false);
-            setPinInput('');
-            setPinError('');
-          }}
-          pinInput={pinInput}
-          setPinInput={setPinInput}
-          pinError={pinError}
-          onUnlock={handleUnlockTeacher}
-        />
       </div>
     );
   }
@@ -3429,14 +4660,31 @@ export default function App() {
               ))}
             </div>
 
-            <button
-              onClick={handleAppendAIPatterns}
-              className="px-2 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-900 border border-blue-300 hover:bg-blue-200 transition-all flex items-center gap-1 shadow-2xs"
-              title="Generate 10 new AI patterns"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-blue-700" />
-              <span>+ AI</span>
-            </button>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-extrabold text-blue-900 bg-blue-100 px-2 py-0.5 rounded-full">
+                {patternIndex + 1}/{activePatterns.length}
+                {aiExtraPatterns.length > 0 && (
+                  <span className="ml-1 text-[9px] text-blue-700 font-black">
+                    (+{aiExtraPatterns.length} AI)
+                  </span>
+                )}
+              </span>
+              <button
+                onClick={() => handleAppendAIPatterns(10, false)}
+                className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-950 border border-blue-300 hover:bg-blue-200 transition-all flex items-center gap-1 shadow-2xs active:scale-95"
+                title="Generate 10 new AI patterns"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-blue-700 animate-pulse" />
+                <span>+10 AI Patterns</span>
+              </button>
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition active:scale-95"
+                title="Open AI Question Generator Hub"
+              >
+                <Layers className="w-4 h-4" />
+              </button>
+            </div>
           </header>
 
           <main className="flex-1 flex flex-col justify-center my-2 gap-3 text-center">
@@ -3606,10 +4854,22 @@ export default function App() {
               })}
             </div>
 
-            <div className="text-right">
+            <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-extrabold text-violet-800 bg-violet-100 px-2 py-0.5 rounded-full">
                 {decisionIndex + 1}/{filteredDecisions.length}
+                {aiExtraDecisions.length > 0 && (
+                  <span className="ml-1 text-[9px] text-violet-700 font-black">
+                    (+{aiExtraDecisions.length} AI)
+                  </span>
+                )}
               </span>
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition active:scale-95"
+                title="Open AI Question Generator Hub"
+              >
+                <Layers className="w-3.5 h-3.5" />
+              </button>
             </div>
           </header>
 
@@ -3638,12 +4898,12 @@ export default function App() {
             })}
 
             <button
-              onClick={handleGenerateMoreDecisions}
-              className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-950 border border-amber-300 hover:bg-amber-200 transition-all shrink-0 flex items-center gap-1 shadow-2xs"
-              title="Generate 4 new AI scenarios"
+              onClick={() => handleAppendAIDecisions(8, false)}
+              className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-950 border border-amber-300 hover:bg-amber-200 transition-all shrink-0 flex items-center gap-1 shadow-2xs active:scale-95"
+              title="Generate 8 new AI scenarios"
             >
-              <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-              <span>+ AI</span>
+              <Sparkles className="w-3.5 h-3.5 text-amber-700 animate-pulse" />
+              <span>+8 AI Scenarios</span>
             </button>
           </div>
 
@@ -3903,14 +5163,26 @@ export default function App() {
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-extrabold text-indigo-800 bg-indigo-100 px-2 py-0.5 rounded-full">
                 {argumentIndex + 1}/{activeArguments.length}
+                {aiExtraArguments.length > 0 && (
+                  <span className="ml-1 text-[9px] text-indigo-700 font-black">
+                    (+{aiExtraArguments.length} AI)
+                  </span>
+                )}
               </span>
               <button
-                onClick={handleAppendAIArguments}
-                className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200 transition flex items-center gap-1 shadow-2xs"
+                onClick={() => handleAppendAIArguments(6, false)}
+                className="px-2.5 py-1 rounded-full text-xs font-bold bg-indigo-100 text-indigo-950 border border-indigo-300 hover:bg-indigo-200 transition flex items-center gap-1 shadow-2xs active:scale-95"
                 title="Generate 6 new AI arguments"
               >
-                <Sparkles className="w-3 h-3 text-amber-700" />
-                <span>+ AI</span>
+                <Sparkles className="w-3.5 h-3.5 text-indigo-700 animate-pulse" />
+                <span>+6 AI Arguments</span>
+              </button>
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition active:scale-95"
+                title="Open AI Question Generator Hub"
+              >
+                <Layers className="w-3.5 h-3.5" />
               </button>
             </div>
           </header>
@@ -4103,14 +5375,26 @@ export default function App() {
             <div className="flex items-center gap-1.5">
               <span className="text-[11px] font-extrabold text-rose-800 bg-rose-100 px-2 py-0.5 rounded-full">
                 {fallacyIndex + 1}/{activeFallacies.length}
+                {aiExtraFallacies.length > 0 && (
+                  <span className="ml-1 text-[9px] text-rose-700 font-black">
+                    (+{aiExtraFallacies.length} AI)
+                  </span>
+                )}
               </span>
               <button
-                onClick={handleAppendAIFallacies}
-                className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200 transition flex items-center gap-1 shadow-2xs"
+                onClick={() => handleAppendAIFallacies(6, false)}
+                className="px-2.5 py-1 rounded-full text-xs font-bold bg-rose-100 text-rose-950 border border-rose-300 hover:bg-rose-200 transition flex items-center gap-1 shadow-2xs active:scale-95"
                 title="Generate 6 new AI fallacies"
               >
-                <Sparkles className="w-3 h-3 text-amber-700" />
-                <span>+ AI</span>
+                <Sparkles className="w-3.5 h-3.5 text-rose-700 animate-pulse" />
+                <span>+6 AI Fallacies</span>
+              </button>
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition active:scale-95"
+                title="Open AI Question Generator Hub"
+              >
+                <Layers className="w-3.5 h-3.5" />
               </button>
             </div>
           </header>
@@ -4306,6 +5590,32 @@ export default function App() {
             </p>
           </div>
 
+          {/* Prominent Daily Streak Celebration Banner */}
+          <div className="mb-3 p-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-rose-500 rounded-2xl text-white shadow-sm flex items-center justify-between gap-3 border border-amber-300">
+            <div className="flex items-center gap-2.5">
+              <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center text-xl shrink-0">
+                <Flame className="w-6 h-6 text-amber-200 animate-pulse" />
+              </div>
+              <div>
+                <span className="text-[9px] font-black uppercase bg-white text-orange-950 px-1.5 py-0.5 rounded shadow-2xs">
+                  DAILY STREAK
+                </span>
+                <h3 className="text-sm font-black text-white mt-0.5">
+                  {effectiveStreak.streak} Consecutive {effectiveStreak.streak === 1 ? 'Day' : 'Days'}! 🔥
+                </h3>
+                <p className="text-[11px] text-amber-100 font-medium">
+                  Practice completed for today! Keep the momentum going tomorrow.
+                </p>
+              </div>
+            </div>
+            {effectiveStreak.bestStreak > 0 && (
+              <div className="text-right shrink-0 bg-white/15 px-2.5 py-1.5 rounded-xl border border-white/20">
+                <span className="text-[8px] font-bold text-amber-100 uppercase block">Record</span>
+                <span className="text-sm font-black text-white">{effectiveStreak.bestStreak}d 🏆</span>
+              </div>
+            )}
+          </div>
+
           {/* Pattern Mastery Badge if completed pattern */}
           {activeLesson === 'pattern' && (
             <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl mb-3 text-xs text-blue-900 font-semibold text-left">
@@ -4324,63 +5634,71 @@ export default function App() {
           <div className="flex flex-col gap-2.5">
             {activeLesson === 'truefalse' && (
               <button
-                onClick={handleAppendAITrueFalse}
+                onClick={() => handleAppendAITrueFalse(10, true)}
                 className="w-full h-13 bg-purple-700 hover:bg-purple-800 active:scale-[0.98] text-white text-base font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all"
               >
                 <Sparkles className="w-5 h-5 text-purple-200" />
-                <span>Practice More (10 New AI Questions) 🚀</span>
+                <span>Practice 10 New AI True/False Questions 🚀</span>
               </button>
             )}
 
             {activeLesson === 'venn' && (
               <button
-                onClick={handleAppendAIVenn}
+                onClick={() => handleAppendAIVenn(6, true)}
                 className="w-full h-13 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white text-base font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all"
               >
                 <Sparkles className="w-5 h-5 text-emerald-200" />
-                <span>Practice More (6 New AI Venn Questions) 🚀</span>
+                <span>Practice 6 New AI Venn Diagram Sets 🚀</span>
               </button>
             )}
 
             {activeLesson === 'pattern' && (
               <button
-                onClick={handleAppendAIPatterns}
+                onClick={() => handleAppendAIPatterns(10, true)}
                 className="w-full h-13 bg-blue-700 hover:bg-blue-800 active:scale-[0.98] text-white text-base font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all"
               >
                 <Sparkles className="w-5 h-5 text-blue-200" />
-                <span>Practice More (10 New AI Patterns) 🚀</span>
+                <span>Practice 10 New AI Number Patterns 🚀</span>
               </button>
             )}
 
             {activeLesson === 'decision' && (
               <button
-                onClick={handleAppendAIDecisions}
+                onClick={() => handleAppendAIDecisions(8, true)}
                 className="w-full h-13 bg-violet-700 hover:bg-violet-800 active:scale-[0.98] text-white text-base font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all"
               >
                 <Sparkles className="w-5 h-5 text-violet-200" />
-                <span>Practice More (8 New AI Scenarios) 🚀</span>
+                <span>Practice 8 New AI Decision Scenarios 🚀</span>
               </button>
             )}
 
             {activeLesson === 'argument' && (
               <button
-                onClick={handleAppendAIArguments}
+                onClick={() => handleAppendAIArguments(6, true)}
                 className="w-full h-13 bg-indigo-700 hover:bg-indigo-800 active:scale-[0.98] text-white text-base font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all"
               >
                 <Sparkles className="w-5 h-5 text-indigo-200" />
-                <span>Generate 10 More AI (Arguments) 🚀</span>
+                <span>Practice 6 New AI Logical Arguments 🚀</span>
               </button>
             )}
 
             {activeLesson === 'fallacy' && (
               <button
-                onClick={handleAppendAIFallacies}
+                onClick={() => handleAppendAIFallacies(6, true)}
                 className="w-full h-13 bg-rose-700 hover:bg-rose-800 active:scale-[0.98] text-white text-base font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition-all"
               >
                 <Sparkles className="w-5 h-5 text-rose-200" />
-                <span>Generate 10 More AI (Fallacies) 🚀</span>
+                <span>Practice 6 New AI Fallacy Scenarios 🚀</span>
               </button>
             )}
+
+            <button
+              onClick={() => setShowAiGeneratorHub(true)}
+              className="w-full h-12 bg-white hover:bg-purple-50 active:scale-[0.98] text-purple-950 text-xs sm:text-sm font-extrabold rounded-xl flex items-center justify-center gap-2 border-2 border-purple-300 shadow-2xs transition-all"
+            >
+              <Sparkles className="w-4 h-4 text-purple-700" />
+              <span>AI Question Hub (Generate for All 6 Apps) ⚡</span>
+            </button>
 
             <div className="grid grid-cols-2 gap-2.5">
               <button
@@ -4455,7 +5773,41 @@ export default function App() {
               ))}
             </div>
 
-            <div className="w-9" />
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-extrabold text-slate-800 bg-slate-200 px-2 py-0.5 rounded-full">
+                {currentIndex + 1}/{questions.length}
+                {((activeLesson === 'truefalse' ? aiExtraTrueFalse.length : aiExtraVenn.length) > 0) && (
+                  <span className="ml-1 text-[9px] text-purple-700 font-black">
+                    (+{activeLesson === 'truefalse' ? aiExtraTrueFalse.length : aiExtraVenn.length} AI)
+                  </span>
+                )}
+              </span>
+              <button
+                onClick={() => {
+                  if (activeLesson === 'truefalse') {
+                    handleAppendAITrueFalse(10, false);
+                  } else {
+                    handleAppendAIVenn(6, false);
+                  }
+                }}
+                className={`px-2.5 py-1 rounded-full text-xs font-bold transition-all flex items-center gap-1 shadow-2xs active:scale-95 ${
+                  activeLesson === 'truefalse'
+                    ? 'bg-purple-100 text-purple-950 border border-purple-300 hover:bg-purple-200'
+                    : 'bg-amber-100 text-amber-950 border border-amber-300 hover:bg-amber-200'
+                }`}
+                title={activeLesson === 'truefalse' ? 'Generate 10 more AI questions' : 'Generate 6 more AI Venn sets'}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-700 animate-pulse" />
+                <span>{activeLesson === 'truefalse' ? '+10 AI' : '+6 AI'}</span>
+              </button>
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="p-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 transition active:scale-95"
+                title="Open AI Question Generator Hub"
+              >
+                <Layers className="w-4 h-4" />
+              </button>
+            </div>
           </header>
 
           <main className="flex-1 flex flex-col justify-center my-2 gap-3">
@@ -4523,6 +5875,11 @@ export default function App() {
 
               <span className="text-xs font-semibold text-slate-500">
                 Question {currentIndex + 1} of {questions.length}
+                {(activeLesson === 'truefalse' ? aiExtraTrueFalse.length : aiExtraVenn.length) > 0 ? (
+                  <span className="ml-1 text-[10px] font-bold text-purple-700 bg-purple-100 px-1.5 py-0.5 rounded-full">
+                    +{activeLesson === 'truefalse' ? aiExtraTrueFalse.length : aiExtraVenn.length} AI
+                  </span>
+                ) : null}
               </span>
 
               <button
@@ -4597,7 +5954,13 @@ export default function App() {
                 <Home className="w-5 h-5" />
               </button>
               <h1 className="text-lg font-extrabold text-[#212121]">Create-Your-Own Logic</h1>
-              <div className="w-8" />
+              <button
+                onClick={() => setShowAiGeneratorHub(true)}
+                className="p-1.5 rounded-lg bg-purple-100 hover:bg-purple-200 text-purple-800 transition active:scale-95"
+                title="Open AI Question Generator Hub"
+              >
+                <Layers className="w-4 h-4" />
+              </button>
             </header>
 
             {/* 6 Tabs for Authoring */}
@@ -4695,14 +6058,25 @@ export default function App() {
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleCheckCustomStatement}
-                className="w-full h-12 bg-purple-700 hover:bg-purple-800 active:scale-[0.98] text-white font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition"
-              >
-                <Sparkles className="w-4 h-4" />
-                <span>Check with AI Guide</span>
-              </button>
+              <div className="grid grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={handleAutoGenerateCreateExample}
+                  className="h-12 bg-white hover:bg-purple-50 text-purple-900 border-2 border-purple-300 font-bold rounded-xl flex items-center justify-center gap-2 transition active:scale-95 text-xs sm:text-sm"
+                  title="Generate an AI example for this logic category"
+                >
+                  <Wand2 className="w-4 h-4 text-purple-700" />
+                  <span>Auto-Draft (AI)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCheckCustomStatement}
+                  className="h-12 bg-purple-700 hover:bg-purple-800 active:scale-[0.98] text-white font-bold rounded-xl flex items-center justify-center gap-2 shadow-sm transition text-xs sm:text-sm"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Check with AI</span>
+                </button>
+              </div>
 
               {createAiGuidance && (
                 <div className="p-3.5 bg-purple-50 border-2 border-purple-200 rounded-xl text-xs sm:text-sm font-medium text-purple-950">
@@ -5099,7 +6473,70 @@ export default function App() {
     );
   }
 
-  return null;
+    return null;
+  };
+
+  return (
+    <>
+      {renderScreenContent()}
+      {renderToast()}
+      <TeacherPinModal
+        isOpen={showPinModal}
+        onClose={() => {
+          setShowPinModal(false);
+          setPinInput('');
+          setPinError('');
+        }}
+        pinInput={pinInput}
+        setPinInput={setPinInput}
+        pinError={pinError}
+        onUnlock={handleUnlockTeacher}
+      />
+      <AiGeneratorHubModal
+        isOpen={showAiGeneratorHub}
+        onClose={() => setShowAiGeneratorHub(false)}
+        counts={{
+          truefalse: 17 + aiExtraTrueFalse.length,
+          venn: 6 + aiExtraVenn.length,
+          pattern: 10 + aiExtraPatterns.length,
+          decision: 12 + aiExtraDecisions.length,
+          argument: 6 + aiExtraArguments.length,
+          fallacy: 6 + aiExtraFallacies.length
+        }}
+        aiCounts={{
+          truefalse: aiExtraTrueFalse.length,
+          venn: aiExtraVenn.length,
+          pattern: aiExtraPatterns.length,
+          decision: aiExtraDecisions.length,
+          argument: aiExtraArguments.length,
+          fallacy: aiExtraFallacies.length
+        }}
+        onGenerateTrueFalse={() => handleAppendAITrueFalse(10, false)}
+        onGenerateVenn={() => handleAppendAIVenn(6, false)}
+        onGeneratePatterns={() => handleAppendAIPatterns(10, false)}
+        onGenerateDecisions={() => handleAppendAIDecisions(8, false)}
+        onGenerateArguments={() => handleAppendAIArguments(6, false)}
+        onGenerateFallacies={() => handleAppendAIFallacies(6, false)}
+        onGenerateAll={handleGenerateAll6Apps}
+        onPlayApp={(app) => {
+          setShowAiGeneratorHub(false);
+          if (app === 'truefalse') {
+            startLesson('truefalse');
+          } else if (app === 'venn') {
+            startLesson('venn');
+          } else if (app === 'pattern') {
+            startLesson('pattern');
+          } else if (app === 'decision') {
+            startLesson('decision');
+          } else if (app === 'argument') {
+            startLesson('argument');
+          } else if (app === 'fallacy') {
+            startLesson('fallacy');
+          }
+        }}
+      />
+    </>
+  );
 }
 
 // ============================================================================
@@ -5167,6 +6604,30 @@ const TeacherPinModal: React.FC<TeacherPinModalProps> = ({
               <Unlock className="w-4 h-4" />
               <span>Unlock Dashboard</span>
             </button>
+
+            <div className="relative my-4">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-slate-100"></div>
+              </div>
+              <div className="relative flex justify-center text-[10px] uppercase">
+                <span className="bg-white px-2 text-slate-400 font-bold tracking-widest text-[8px]">OR SYNC ALL DEVICES</span>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={async () => {
+                const u = await signInWithGoogle();
+                if (u) {
+                  onUnlock();
+                }
+              }}
+              className="w-full h-12 bg-white hover:bg-slate-50 text-slate-700 border-2 border-slate-200 font-bold rounded-xl shadow-sm active:scale-[0.98] transition flex items-center justify-center gap-2"
+            >
+              <Globe className="w-4 h-4 text-blue-500" />
+              <span>Sign in with Google</span>
+            </button>
+
             <button
               type="button"
               onClick={onClose}
@@ -5176,6 +6637,253 @@ const TeacherPinModal: React.FC<TeacherPinModalProps> = ({
             </button>
           </div>
         </form>
+      </motion.div>
+    </div>
+  );
+};
+
+// ============================================================================
+// AI QUESTION GENERATOR HUB MODAL (ACROSS ALL 6 APPS)
+// ============================================================================
+interface AiGeneratorHubModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  counts: {
+    truefalse: number;
+    venn: number;
+    pattern: number;
+    decision: number;
+    argument: number;
+    fallacy: number;
+  };
+  aiCounts: {
+    truefalse: number;
+    venn: number;
+    pattern: number;
+    decision: number;
+    argument: number;
+    fallacy: number;
+  };
+  onGenerateTrueFalse: () => void;
+  onGenerateVenn: () => void;
+  onGeneratePatterns: () => void;
+  onGenerateDecisions: () => void;
+  onGenerateArguments: () => void;
+  onGenerateFallacies: () => void;
+  onGenerateAll: () => void;
+  onPlayApp: (app: 'truefalse' | 'venn' | 'pattern' | 'decision' | 'argument' | 'fallacy') => void;
+}
+
+const AiGeneratorHubModal: React.FC<AiGeneratorHubModalProps> = ({
+  isOpen,
+  onClose,
+  counts,
+  aiCounts,
+  onGenerateTrueFalse,
+  onGenerateVenn,
+  onGeneratePatterns,
+  onGenerateDecisions,
+  onGenerateArguments,
+  onGenerateFallacies,
+  onGenerateAll,
+  onPlayApp
+}) => {
+  if (!isOpen) return null;
+
+  const appModules = [
+    {
+      id: 'truefalse' as const,
+      icon: '🎮',
+      name: 'Lesson 1: True / False Logic',
+      desc: 'Universal vs Existential quantifiers (All, Some, None)',
+      base: 17,
+      ai: aiCounts.truefalse,
+      total: counts.truefalse,
+      generateBtn: '+10 AI Questions',
+      onGenerate: onGenerateTrueFalse,
+      color: 'border-emerald-500 bg-emerald-50/40 text-emerald-950',
+      btnColor: 'bg-emerald-700 hover:bg-emerald-800 text-white'
+    },
+    {
+      id: 'venn' as const,
+      icon: '⭕',
+      name: 'Lesson 2: Venn Diagram Sets',
+      desc: 'Overlaps, subsets, and disjoint set reasoning',
+      base: 6,
+      ai: aiCounts.venn,
+      total: counts.venn,
+      generateBtn: '+6 AI Venn Sets',
+      onGenerate: onGenerateVenn,
+      color: 'border-amber-500 bg-amber-50/40 text-amber-950',
+      btnColor: 'bg-amber-700 hover:bg-amber-800 text-white'
+    },
+    {
+      id: 'pattern' as const,
+      icon: '🔢',
+      name: 'Lesson 3: Pattern Master',
+      desc: 'Linear, subtractive, and doubling number sequences',
+      base: 10,
+      ai: aiCounts.pattern,
+      total: counts.pattern,
+      generateBtn: '+10 AI Patterns',
+      onGenerate: onGeneratePatterns,
+      color: 'border-blue-500 bg-blue-50/40 text-blue-950',
+      btnColor: 'bg-blue-700 hover:bg-blue-800 text-white'
+    },
+    {
+      id: 'decision' as const,
+      icon: '🧠',
+      name: 'Lesson 4: Decision Maker',
+      desc: 'Real-world Ghana scenarios with multi-factor risk evaluation',
+      base: 12,
+      ai: aiCounts.decision,
+      total: counts.decision,
+      generateBtn: '+8 AI Scenarios',
+      onGenerate: onGenerateDecisions,
+      color: 'border-violet-500 bg-violet-50/40 text-violet-950',
+      btnColor: 'bg-violet-700 hover:bg-violet-800 text-white'
+    },
+    {
+      id: 'argument' as const,
+      icon: '⚖️',
+      name: 'Lesson 5: Argument Builder',
+      desc: 'Modus Ponens, Modus Tollens, and deductive syllogisms',
+      base: 6,
+      ai: aiCounts.argument,
+      total: counts.argument,
+      generateBtn: '+6 AI Arguments',
+      onGenerate: onGenerateArguments,
+      color: 'border-indigo-500 bg-indigo-50/40 text-indigo-950',
+      btnColor: 'bg-indigo-700 hover:bg-indigo-800 text-white'
+    },
+    {
+      id: 'fallacy' as const,
+      icon: '🔍',
+      name: 'Lesson 6: Spot the Fallacy',
+      desc: 'Hasty generalizations, false cause, bandwagon, and biases',
+      base: 6,
+      ai: aiCounts.fallacy,
+      total: counts.fallacy,
+      generateBtn: '+6 AI Fallacies',
+      onGenerate: onGenerateFallacies,
+      color: 'border-rose-500 bg-rose-50/40 text-rose-950',
+      btnColor: 'bg-rose-700 hover:bg-rose-800 text-white'
+    }
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-3 sm:p-4 overflow-y-auto">
+      <motion.div
+        initial={{ scale: 0.92, opacity: 0 }}
+        animate={{ scale: 1, opacity: 1 }}
+        exit={{ scale: 0.92, opacity: 0 }}
+        className="w-full max-w-lg bg-white rounded-3xl p-4 sm:p-6 shadow-2xl border border-slate-200 my-auto text-left relative max-h-[92vh] flex flex-col justify-between overflow-hidden"
+      >
+        <div className="flex items-center justify-between pb-3 border-b border-slate-200 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="w-10 h-10 rounded-2xl bg-purple-100 text-purple-800 flex items-center justify-center">
+              <Sparkles className="w-5 h-5 text-purple-700 animate-pulse" />
+            </div>
+            <div>
+              <h2 className="text-base sm:text-lg font-black text-slate-900 leading-tight">
+                AI Question Generator Hub
+              </h2>
+              <p className="text-[11px] text-slate-500 font-medium">
+                Generate unlimited questions across all 6 modules
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-900 flex items-center justify-center text-sm font-bold transition"
+            title="Close"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Master Full-Pack Generator */}
+        <div className="my-3 p-3.5 bg-gradient-to-r from-purple-800 via-indigo-800 to-emerald-800 rounded-2xl text-white shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-3 shrink-0">
+          <div>
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] font-black uppercase bg-amber-400 text-purple-950 px-1.5 py-0.5 rounded">
+                MASTER ACTION
+              </span>
+              <h3 className="text-sm font-black text-white">Full Curriculum Pack</h3>
+            </div>
+            <p className="text-[11px] text-purple-100 mt-0.5">
+              Generates fresh questions for all 6 learning modules simultaneously (+46 total)
+            </p>
+          </div>
+          <button
+            onClick={onGenerateAll}
+            className="px-3.5 py-2.5 bg-white hover:bg-amber-100 text-purple-950 font-black text-xs rounded-xl shadow-xs transition active:scale-95 shrink-0 flex items-center justify-center gap-1.5"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-purple-700" />
+            <span>Generate All 6 Apps 🚀</span>
+          </button>
+        </div>
+
+        {/* 6 Module Generator Cards */}
+        <div className="overflow-y-auto space-y-2.5 pr-1 flex-1 py-1 max-h-[50vh]">
+          {appModules.map((m) => (
+            <div
+              key={m.id}
+              className={`p-3 rounded-2xl border-2 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${m.color}`}
+            >
+              <div className="flex items-start gap-2.5">
+                <span className="text-2xl shrink-0 mt-0.5">{m.icon}</span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-xs sm:text-sm font-black text-slate-900 leading-tight">
+                      {m.name}
+                    </h4>
+                    {m.ai > 0 && (
+                      <span className="text-[10px] font-black bg-purple-200 text-purple-900 px-1.5 py-0.2 rounded-full">
+                        +{m.ai} AI
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-600 line-clamp-1 mt-0.5">
+                    {m.desc}
+                  </p>
+                  <p className="text-[10px] font-extrabold text-slate-500 mt-1">
+                    Total: <strong className="text-slate-800">{m.total} questions</strong> ({m.base} base + {m.ai} AI)
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                <button
+                  onClick={m.onGenerate}
+                  className="px-2.5 py-2 bg-white hover:bg-slate-50 text-slate-900 border border-slate-300 font-extrabold text-[11px] rounded-xl transition shadow-2xs active:scale-95 flex items-center gap-1"
+                  title="Generate more questions for this app"
+                >
+                  <Sparkles className="w-3 h-3 text-purple-600" />
+                  <span>{m.generateBtn}</span>
+                </button>
+                <button
+                  onClick={() => onPlayApp(m.id)}
+                  className={`px-3 py-2 font-extrabold text-[11px] rounded-xl transition shadow-2xs active:scale-95 flex items-center gap-1 ${m.btnColor}`}
+                >
+                  <span>Play ▶</span>
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="pt-3 border-t border-slate-200 flex items-center justify-between shrink-0">
+          <p className="text-[11px] text-slate-500 font-medium">
+            Offline-first · Biakoye Senior High School Logic
+          </p>
+          <button
+            onClick={onClose}
+            className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs rounded-xl transition active:scale-95"
+          >
+            Done
+          </button>
+        </div>
       </motion.div>
     </div>
   );

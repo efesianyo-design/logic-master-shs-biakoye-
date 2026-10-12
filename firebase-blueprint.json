@@ -1,0 +1,55 @@
+{
+  "entities": {
+    "Learner": {
+      "title": "Learner",
+      "description": "A learner profile tracking progress and streaks.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "The unique ID of the learner." },
+        "name": { "type": "string", "description": "Display name of the learner." },
+        "scores": {
+          "type": "array",
+          "description": "History of lesson scores.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "mode": { "type": "string" },
+              "score": { "type": "number" },
+              "total": { "type": "number" },
+              "pct": { "type": "number" },
+              "date": { "type": "string" }
+            }
+          }
+        },
+        "avg": { "type": "number", "description": "Average score percentage." },
+        "weak": { "type": "array", "items": { "type": "string" }, "description": "List of weak concepts." },
+        "lastSeen": { "type": "string", "description": "ISO timestamp of last activity." },
+        "streak": { "type": "number", "description": "Current daily streak." },
+        "lastLessonDate": { "type": "string", "description": "YYYY-MM-DD of last completed lesson." },
+        "bestStreak": { "type": "number", "description": "All-time best daily streak." },
+        "ownerId": { "type": "string", "description": "The UID of the user who created/owns this profile." }
+      },
+      "required": ["id", "name", "ownerId"]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Users with teacher/admin access.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/learners/{learnerId}": {
+      "schema": "Learner",
+      "description": "Global collection of learners."
+    },
+    "/admins/{adminId}": {
+      "schema": "Admin",
+      "description": "List of admin users."
+    }
+  }
+}

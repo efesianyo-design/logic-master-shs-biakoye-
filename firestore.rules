@@ -1,0 +1,71 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.ownerId == request.auth.uid;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation helpers
+    function isValidLearner(data) {
+      return data.keys().hasAll(['id', 'name', 'ownerId'])
+        && data.keys().hasOnly(['id', 'name', 'scores', 'avg', 'weak', 'lastSeen', 'streak', 'lastLessonDate', 'bestStreak', 'ownerId'])
+        && data.id is string
+        && data.name is string && data.name.size() <= 100
+        && data.ownerId == request.auth.uid
+        && (data.streak == null || data.streak is number)
+        && (data.avg == null || data.avg is number)
+        && (data.lastSeen == null || data.lastSeen is string);
+    }
+
+    // 2. Learners collection
+    match /learners/{learnerId} {
+      allow get: if isSignedIn() && (isOwner(existing()) || isAdmin());
+      allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+      
+      allow create: if isSignedIn() 
+        && isValidId(learnerId)
+        && isValidLearner(incoming())
+        && incoming().id == learnerId;
+
+      allow update: if isSignedIn()
+        && (isOwner(existing()) || isAdmin())
+        && isValidLearner(incoming())
+        && incoming().ownerId == existing().ownerId
+        && incoming().id == existing().id;
+
+      allow delete: if isAdmin();
+    }
+
+    // 3. Admins collection
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && request.auth.uid == adminId;
+      // Creation/deletion handled outside client SDK or by system admin
+    }
+  }
+}
