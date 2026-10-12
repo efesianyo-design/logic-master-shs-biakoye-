@@ -2774,14 +2774,20 @@ export default function App() {
   const handleClearAllData = () => {
     if (window.confirm('Are you sure you want to clear all student records and diagnostic data? This cannot be undone.')) {
       localStorage.removeItem('logicmaster_learners');
+      localStorage.removeItem('logicmaster_active_learner_id');
       localStorage.removeItem('logicmaster_wrong_answers');
       localStorage.removeItem('logicmaster_scores');
       localStorage.removeItem('challengeHistory');
       localStorage.removeItem('patternProgress');
       localStorage.removeItem('decisionProgress');
+      localStorage.removeItem('logicmaster_overlooked_factors');
+      localStorage.removeItem('myQuestions');
       setAllLearners([]);
       setHistoricalWrong([]);
       setWrongAnswers([]);
+      setSavedUserQuestions([]);
+      setMasteredPatternTypes([]);
+      setOverlookedFactorsLog([]);
       setCurrentLearner(null);
       handleLockTeacher();
     }
