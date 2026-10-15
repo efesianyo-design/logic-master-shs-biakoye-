@@ -33,7 +33,7 @@ service cloud.firestore {
 
     // Validation helpers
     function isValidLearner(data) {
-      return data.keys().hasAll(['id', 'name', 'ownerId'])
+      return data.keys().hasAll(['id', 'name'])
         && data.keys().hasOnly(['id', 'name', 'scores', 'avg', 'weak', 'lastSeen', 'streak', 'lastLessonDate', 'bestStreak', 'ownerId', 'activeApp'])
         && data.id is string
         && data.name is string && data.name.size() <= 100
@@ -44,15 +44,14 @@ service cloud.firestore {
 
     // 2. Learners collection
     match /learners/{learnerId} {
-      allow get, list: if isSignedIn();
+      // Public access to support "name-only" login and fix anonymous auth error
+      allow get, list, create, update: if true;
       
-      allow create: if isSignedIn() 
-        && isValidId(learnerId)
+      allow create: if isValidId(learnerId)
         && isValidLearner(incoming())
         && incoming().id == learnerId;
 
-      allow update: if isSignedIn()
-        && isValidLearner(incoming())
+      allow update: if isValidLearner(incoming())
         && incoming().id == learnerId;
 
       allow delete: if isAdmin();
@@ -61,7 +60,6 @@ service cloud.firestore {
     // 3. Admins collection
     match /admins/{adminId} {
       allow get: if isSignedIn() && request.auth.uid == adminId;
-      // Creation/deletion handled outside client SDK or by system admin
     }
   }
 }

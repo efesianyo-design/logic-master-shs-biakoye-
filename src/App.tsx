@@ -2173,6 +2173,22 @@ const AppFooter: React.FC<AppFooterProps> = ({ onTriggerHiddenTeacher }) => {
 export default function App() {
   // Screens: 'login' | 'welcome' | 'quiz' | 'results' | 'create' | 'challengeSetup' | 'challengeGame' | 'teacherDashboard' | 'patternGame' | 'decisionGame' | 'argumentGame' | 'fallacyGame'
   const [screen, setScreen] = useState<'login' | 'welcome' | 'quiz' | 'results' | 'create' | 'challengeSetup' | 'challengeGame' | 'teacherDashboard' | 'patternGame' | 'decisionGame' | 'argumentGame' | 'fallacyGame'>('login');
+  const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('offline', handleOffline);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleOnline);
+        window.removeEventListener('offline', handleOffline);
+      }
+    };
+  }, []);
   const [activeLesson, setActiveLesson] = useState<'truefalse' | 'venn' | 'pattern' | 'decision' | 'argument' | 'fallacy' | 'custom' | 'ai'>('truefalse');
   
   // Current logged in learner
@@ -2322,9 +2338,7 @@ export default function App() {
       setCloudLearners(records);
     });
 
-    // Ensure we have an anonymous session at minimum for Firestore rules
-    ensureAuth();
-    testConnection();
+    // testConnection();
 
     return () => {
       unsubAuth();
@@ -4200,6 +4214,12 @@ export default function App() {
                 <span className="text-xs font-bold text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-full">
                   Hello, {currentLearner?.name || 'Learner'}!
                 </span>
+                {!isOnline && (
+                  <span className="text-[10px] font-black text-red-700 bg-red-100 px-2 py-0.5 rounded flex items-center gap-1 animate-pulse border border-red-200">
+                    <Wifi className="w-3 h-3" />
+                    OFFLINE
+                  </span>
+                )}
                 <button
                   onClick={handleLogout}
                   className="text-[11px] text-slate-500 hover:text-red-600 underline"
@@ -6605,28 +6625,7 @@ const TeacherPinModal: React.FC<TeacherPinModalProps> = ({
               <span>Unlock Dashboard</span>
             </button>
 
-            <div className="relative my-4">
-              <div className="absolute inset-0 flex items-center">
-                <div className="w-full border-t border-slate-100"></div>
-              </div>
-              <div className="relative flex justify-center text-[10px] uppercase">
-                <span className="bg-white px-2 text-slate-400 font-bold tracking-widest text-[8px]">OR SYNC ALL DEVICES</span>
-              </div>
-            </div>
 
-            <button
-              type="button"
-              onClick={async () => {
-                const u = await signInWithGoogle();
-                if (u) {
-                  onUnlock();
-                }
-              }}
-              className="w-full h-12 bg-white hover:bg-slate-50 text-slate-700 border-2 border-slate-200 font-bold rounded-xl shadow-sm active:scale-[0.98] transition flex items-center justify-center gap-2"
-            >
-              <Globe className="w-4 h-4 text-blue-500" />
-              <span>Sign in with Google</span>
-            </button>
 
             <button
               type="button"

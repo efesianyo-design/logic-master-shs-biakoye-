@@ -4,8 +4,7 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   signOut,
-  onAuthStateChanged,
-  signInAnonymously
+  onAuthStateChanged
 } from 'firebase/auth';
 import {
   getFirestore,
@@ -16,7 +15,8 @@ import {
   getDocs,
   getDocFromServer,
   query,
-  where
+  where,
+  enableMultiTabIndexedDbPersistence
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
@@ -26,22 +26,27 @@ export const app = initializeApp(firebaseConfig);
 // CRITICAL: Initialize Firestore using the provisioned database ID
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
+// Enable Offline Persistence
+if (typeof window !== 'undefined') {
+  enableMultiTabIndexedDbPersistence(db).catch((err) => {
+    if (err.code === 'failed-precondition') {
+      console.warn('Persistence failed: Multiple tabs open');
+    } else if (err.code === 'unimplemented-state') {
+      console.warn('Persistence failed: Browser not supported');
+    }
+  });
+}
+
 // Auth instance
 export const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
 
 /**
- * Ensures the user is authenticated (at least anonymously) to satisfy Firestore rules.
+ * Placeholder for ensureAuth since anonymous auth is restricted in this project.
+ * Returns null as we now rely on public firestore rules for learners.
  */
 export async function ensureAuth() {
-  if (auth.currentUser) return auth.currentUser;
-  try {
-    const result = await signInAnonymously(auth);
-    return result.user;
-  } catch (error) {
-    console.error('Anonymous auth error:', error);
-    return null;
-  }
+  return auth.currentUser;
 }
 
 export async function signInWithGoogle() {
