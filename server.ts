@@ -72,8 +72,13 @@ app.post('/api/ai/generate-venn', async (req, res) => {
     const response = await ai.models.generateContent({
       model: "gemini-3.8-flash",
       contents: `Generate ${count} Venn Diagram scenarios for SHS students in Ghana. 
-      Each scenario should have two sets (Left, Right) and an Overlap. 
-      Include 3 true/false questions per scenario.`,
+      Each scenario should have two sets (Left, Right) and an Overlap statement. 
+      Include 3 true/false questions per scenario (ALL/SOME/NONE).
+      
+      CRITICAL RULE for selecting the "type":
+      1. If "ALL Left are Right" is TRUE, set type to "subset".
+      2. If "SOME Left are Right" is TRUE AND "ALL Left are Right" is FALSE, set type to "overlap".
+      3. If "NO Left are in Right" is TRUE, set type to "disjoint".`,
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -87,6 +92,7 @@ app.post('/api/ai/generate-venn', async (req, res) => {
                   left: { type: Type.STRING },
                   right: { type: Type.STRING },
                   overlap: { type: Type.STRING },
+                  type: { type: Type.STRING, enum: ["subset", "overlap", "disjoint"] },
                   questions: {
                     type: Type.ARRAY,
                     items: {
@@ -100,7 +106,7 @@ app.post('/api/ai/generate-venn', async (req, res) => {
                     }
                   }
                 },
-                required: ["left", "right", "overlap", "questions"]
+                required: ["left", "right", "overlap", "type", "questions"]
               }
             }
           },

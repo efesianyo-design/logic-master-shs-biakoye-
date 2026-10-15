@@ -70,6 +70,7 @@ interface StatementItem {
 interface VennQuestion {
   q: string;
   a: 'TRUE' | 'FALSE';
+  diagramType: 'subset' | 'overlap' | 'disjoint';
   exp: string;
 }
 
@@ -77,7 +78,8 @@ interface VennScenario {
   id: string;
   left: string;
   right: string;
-  overlap: string;
+  overlap?: string;
+  type?: 'subset' | 'overlap' | 'disjoint';
   questions: VennQuestion[];
   ai?: boolean;
 }
@@ -137,7 +139,8 @@ interface PlayableQuestion {
     id: string;
     left: string;
     right: string;
-    overlap: string;
+    overlap?: string;
+    type?: 'subset' | 'overlap' | 'disjoint';
   };
   conceptType?: 'ALL' | 'SOME' | 'NONE' | 'GENERAL';
 }
@@ -162,7 +165,7 @@ interface LearnerScoreItem {
 }
 
 interface LearnerProfile {
-  id: number;
+  id: number | string;
   name: string;
   scores: LearnerScoreItem[];
   avg: number;
@@ -380,59 +383,112 @@ const STATEMENTS: StatementItem[] = [
 ];
 
 const VENN_SCENARIOS: VennScenario[] = [
+  // SCENARIO 1: Farmers - Two separate realities for teaching
   {
-    id: "v1",
-    left: "Teachers",
-    right: "People who go on Holidays",
-    overlap: "SOME Teachers go on Holidays",
-    questions: [
-      { q: "All teachers go on holidays", a: "FALSE", exp: "Only SOME go, shown in overlap" },
-      { q: "Some teachers go on holidays", a: "TRUE", exp: "Overlap shows SOME do" },
-      { q: "No teachers go on holidays", a: "FALSE", exp: "Overlap shows some DO go" }
-    ]
-  },
-  {
-    id: "v2",
-    left: "Students",
-    right: "People who study hard",
-    overlap: "SOME Students study hard",
-    questions: [
-      { q: "All students study hard", a: "FALSE", exp: "Only some, in overlap" },
-      { q: "Some students study hard", a: "TRUE", exp: "Overlap = some students" },
-      { q: "No students study hard", a: "FALSE", exp: "False, overlap exists" }
-    ]
-  },
-  {
-    id: "v3",
+    id: "farmers-all",
     left: "Farmers",
-    right: "People who grow crops",
-    overlap: "ALL Farmers grow crops",
+    right: "People who grow crops OR rear animals", // More true in real life
     questions: [
-      { q: "All farmers grow crops", a: "TRUE", exp: "All farmers are inside crop growers" },
-      { q: "Some farmers grow crops", a: "TRUE", exp: "If ALL, then SOME is also true" },
-      { q: "No farmers grow crops", a: "FALSE", exp: "Farmers DO grow crops" }
+      {
+        q: "All farmers grow crops or rear animals",
+        a: "TRUE",
+        diagramType: "subset", // ALL = subset
+        exp: "Farmers circle INSIDE Grow/Rear circle - so ALL farmers do"
+      }
     ]
   },
   {
-    id: "v4",
+    id: "farmers-some",
+    left: "Farmers",
+    right: "People who grow MAIZE",
+    questions: [
+      {
+        q: "Some farmers grow maize",
+        a: "TRUE",
+        diagramType: "overlap", // SOME = overlap - THIS FIXES YOUR SCREENSHOT
+        exp: "Overlap shows SOME farmers grow maize, some grow other crops"
+      },
+      {
+        q: "All farmers grow maize",
+        a: "FALSE",
+        diagramType: "overlap",
+        exp: "Not ALL - overlap only, some grow cassava/yam"
+      },
+      {
+        q: "No farmers grow maize",
+        a: "FALSE",
+        diagramType: "overlap",
+        exp: "False, overlap shows some DO"
+      }
+    ]
+  },
+  // SCENARIO 2: Girls Football - Separate CAN vs DO
+  {
+    id: "girls-can",
     left: "Girls",
-    right: "People who can play football",
-    overlap: "SOME Girls can play football",
+    right: "People who CAN play football (ability)",
     questions: [
-      { q: "All girls can play football", a: "TRUE", exp: "In our class, we say all girls CAN" },
-      { q: "Girls cannot play football", a: "FALSE", exp: "Girls CAN play" },
-      { q: "Some girls can play football", a: "TRUE", exp: "Some = at least one" }
+      {
+        q: "All girls CAN play football",
+        a: "TRUE",
+        diagramType: "subset", // ALL CAN = subset (equality lesson)
+        exp: "All girls HAVE ABILITY - subset"
+      },
+      {
+        q: "Girls cannot play football",
+        a: "FALSE",
+        diagramType: "subset",
+        exp: "False, they CAN - inside circle"
+      }
     ]
   },
   {
-    id: "v5",
-    left: "Boys",
-    right: "People who can cook",
-    overlap: "SOME Boys can cook",
+    id: "girls-do",
+    left: "Girls",
+    right: "People who DO play football daily",
     questions: [
-      { q: "All boys can cook", a: "TRUE", exp: "All boys CAN learn to cook" },
-      { q: "Boys cannot cook", a: "FALSE", exp: "Boys CAN cook" },
-      { q: "Some boys can cook", a: "TRUE", exp: "At least some can" }
+      {
+        q: "Some girls DO play football daily",
+        a: "TRUE",
+        diagramType: "overlap", // SOME DO = overlap
+        exp: "SOME girls do daily, not all"
+      },
+      {
+        q: "All girls DO play football daily",
+        a: "FALSE",
+        diagramType: "overlap",
+        exp: "Not ALL do daily - only overlap"
+      }
+    ]
+  },
+  // SCENARIO 3: Boys Cooking - Same fix
+  {
+    id: "boys-can",
+    left: "Boys",
+    right: "People who CAN cook",
+    questions: [
+      { q: "All boys CAN cook", a: "TRUE", diagramType: "subset", exp: "All boys CAN learn - subset" },
+      { q: "Boys cannot cook", a: "FALSE", diagramType: "subset", exp: "False, they CAN" }
+    ]
+  },
+  {
+    id: "boys-do",
+    left: "Boys",
+    right: "People who DO cook daily",
+    questions: [
+      { q: "Some boys DO cook daily", a: "TRUE", diagramType: "overlap", exp: "SOME do daily" },
+      { q: "All boys DO cook daily", a: "FALSE", diagramType: "overlap", exp: "Not all do daily - overlap only" }
+    ]
+  },
+  // SCENARIO 4: Teachers Holidays - Classic OVERLAP for SOME
+  {
+    id: "teachers-holiday",
+    left: "Teachers",
+    right: "People who go on holidays",
+    questions: [
+      { q: "Some teachers go on holidays", a: "TRUE", diagramType: "overlap", exp: "Overlap = some do" },
+      { q: "All teachers go on holidays", a: "FALSE", diagramType: "overlap", exp: "Not all - only overlap" },
+      { q: "No teachers go on holidays", a: "FALSE", diagramType: "overlap", exp: "Some DO, so not none" }
     ]
   }
 ];
@@ -1472,7 +1528,7 @@ function generateAITrueFalse(n: any = 10): StatementItem[] {
     if (i < shuffledCurated.length) {
       const item = shuffledCurated[i];
       selected.push({
-        id: `ai-tf-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`,
+        id: `ai-tf-${Date.now()}-${i}-${Math.floor(Math.random() * 1000000)}`,
         text: item.text,
         answer: item.answer,
         level: "AI",
@@ -1500,7 +1556,7 @@ function generateAITrueFalse(n: any = 10): StatementItem[] {
       const answer = isUniversal ? "FALSE" : "TRUE";
       const exp = isUniversal ? `Universal quantifier 'ALL' fails because counter-examples exist.` : `Existential quantifier 'SOME' is satisfied because members do this.`;
       selected.push({
-        id: `ai-tf-gen-${Date.now()}-${i}`,
+        id: `ai-tf-gen-${Date.now()}-${i}-${Math.floor(Math.random() * 1000000)}`,
         text,
         answer,
         level: "AI",
@@ -1541,7 +1597,7 @@ function generateAIVenn(n: any = 6): VennScenario[] {
 
   for (let i = 0; i < safeN; i++) {
     const pair = shuffled[i % shuffled.length];
-    const scenarioId = `v-ai-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`;
+    const scenarioId = `v-ai-${Date.now()}-${i}-${Math.floor(Math.random() * 1000000)}`;
     const questionType = i % 3;
 
     let qText = "";
@@ -1572,6 +1628,7 @@ function generateAIVenn(n: any = 6): VennScenario[] {
         {
           q: qText,
           a: qAns,
+          diagramType: 'overlap',
           exp: qExp
         }
       ]
@@ -1646,7 +1703,7 @@ function generateAIPatterns(n: any = 10): PatternItem[] {
     const theme = storyThemes[i % storyThemes.length];
 
     return {
-      id: 2000 + i + Math.floor(Math.random() * 5000),
+      id: `ai-pat-${Date.now()}-${i}-${Math.floor(Math.random() * 1000000)}`,
       seq,
       answer: ans,
       options,
@@ -1750,7 +1807,7 @@ function generateAIDecisions(n: any = 8): DecisionScenario[] {
   return Array.from({ length: safeN }, (_, i) => {
     const t = templates[i % templates.length];
     return {
-      id: `dec-ai-${Date.now()}-${i}`,
+      id: `dec-ai-${Date.now()}-${i}-${Math.floor(Math.random() * 1000000)}`,
       category: t.category,
       title: `${t.title} (AI)`,
       story: t.story,
@@ -1858,7 +1915,7 @@ function generateAIArguments(n: any = 6): ArgumentItem[] {
   return Array.from({ length: safeN }, (_, i) => {
     const t = templates[i % templates.length];
     return {
-      id: `ai-arg-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`,
+      id: `ai-arg-${Date.now()}-${i}-${Math.floor(Math.random() * 1000000)}`,
       premise1: t.p1,
       premise2: t.p2,
       q: t.q,
@@ -1944,7 +2001,7 @@ function generateAIFallacies(n: any = 6): FallacyItem[] {
   return Array.from({ length: safeN }, (_, i) => {
     const t = templates[i % templates.length];
     return {
-      id: `ai-fal-${Date.now()}-${i}-${Math.floor(Math.random() * 1000)}`,
+      id: `ai-fal-${Date.now()}-${i}-${Math.floor(Math.random() * 1000000)}`,
       statement: t.statement,
       q: t.q,
       opts: [...t.opts].sort(() => 0.5 - Math.random()),
@@ -2007,110 +2064,75 @@ const ConfettiRain: React.FC = () => {
 
 // SVG Venn Diagram with active animation
 interface VennDiagramProps {
-  scenario: {
-    left: string;
-    right: string;
-    overlap: string;
-  };
+  leftLabel: string;
+  rightLabel: string;
+  type?: 'subset' | 'overlap' | 'disjoint';
   highlightState?: 'SOME' | 'ALL' | 'NONE' | null;
   compact?: boolean;
 }
 
 const VennDiagram: React.FC<VennDiagramProps> = ({
-  scenario,
+  leftLabel,
+  rightLabel,
+  type: explicitType,
   highlightState = null,
   compact = false
 }) => {
-  const isAll = highlightState === 'ALL' || scenario.overlap.toUpperCase().includes('ALL');
-  const isSome = highlightState === 'SOME' || scenario.overlap.toUpperCase().includes('SOME');
-  const isNone = highlightState === 'NONE';
+  // Derive type from explicit type or highlightState
+  let type: "subset" | "overlap" | "disjoint" = explicitType || "overlap";
+  
+  // If highlightState is provided, it can override explicit type for teaching moments
+  if (highlightState === 'ALL') type = "subset";
+  if (highlightState === 'NONE') type = "disjoint";
+  if (highlightState === 'SOME') type = "overlap";
 
   return (
-    <div className={`w-full flex flex-col items-center select-none ${compact ? 'max-w-[240px]' : 'max-w-[340px]'}`}>
-      <svg
-        viewBox="0 0 340 200"
-        className="w-full h-auto drop-shadow-sm"
-        xmlns="http://www.w3.org/2000/svg"
-        aria-label="Venn diagram showing two overlapping groups"
-      >
-        <defs>
-          <clipPath id="circleLeftClip">
-            <circle cx="120" cy="100" r="78" />
-          </clipPath>
-          <clipPath id="circleRightClip">
-            <circle cx="220" cy="100" r="78" />
-          </clipPath>
-        </defs>
-
-        <motion.circle
-          cx={isNone ? 100 : 120}
-          cy="100"
-          r="78"
-          fill="#E8F5E9"
-          stroke="#0B6E4F"
-          strokeWidth={isAll ? '5' : '3'}
-          animate={isAll ? { scale: [1, 1.03, 1] } : {}}
-          transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
-        />
-
-        <motion.circle
-          cx={isNone ? 240 : 220}
-          cy="100"
-          r="78"
-          fill="#FFF8E1"
-          stroke="#FFC107"
-          strokeWidth="3"
-        />
-
-        {!isNone && (
-          <motion.circle
-            cx="220"
-            cy="100"
-            r="78"
-            clipPath="url(#circleLeftClip)"
-            fill="#FFC107"
-            fillOpacity={0.65}
-            animate={isSome ? { scale: [1, 1.08, 1] } : {}}
-            transition={{ duration: 0.9, repeat: Infinity, ease: 'easeInOut' }}
-            style={{ transformOrigin: '170px 100px' }}
-          />
+    <div className={`w-full flex flex-col items-center gap-2 ${compact ? 'max-w-[240px]' : 'max-w-[340px]'}`}>
+      <svg viewBox="0 0 300 180" className="w-full h-auto">
+        {type === "subset" && (
+          <>
+            {/* Outer large circle (Right) */}
+            <circle cx="150" cy="90" r="80" fill="#FFF8E1" stroke="#FFC107" strokeWidth="3" />
+            {/* Inner small circle (Left) fully inside */}
+            <circle cx="150" cy="90" r="45" fill="#E8F5E9" stroke="#0B6E4F" strokeWidth="3" />
+            {/* Minimal labels to avoid truncation, relying on legend */}
+            <text x="150" y="93" textAnchor="middle" fontSize="14" fontWeight="800" fill="#0B6E4F">L</text>
+            <text x="150" y="30" textAnchor="middle" fontSize="14" fontWeight="800" fill="#FFC107">R</text>
+            <text x="150" y="155" textAnchor="middle" fontSize="11" fill="#5D4037">ALL Left are inside Right</text>
+          </>
         )}
-
-        <text
-          x={isNone ? 80 : 85}
-          y="100"
-          textAnchor="middle"
-          dominantBaseline="middle"
-          className="fill-slate-800 text-[12px] font-bold"
-        >
-          {scenario.left}
-        </text>
-
-        <text
-          x={isNone ? 260 : 255}
-          y="100"
-          textAnchor="middle"
-          dominantBaseline="middle"
-          className="fill-slate-800 text-[12px] font-bold"
-        >
-          {scenario.right.length > 14 ? `${scenario.right.slice(0, 12)}…` : scenario.right}
-        </text>
-
-        {!isNone && (
-          <text
-            x="170"
-            y="100"
-            textAnchor="middle"
-            dominantBaseline="middle"
-            className="fill-emerald-950 text-[10px] font-extrabold uppercase tracking-tight"
-          >
-            OVERLAP
-          </text>
+        {type === "overlap" && (
+          <>
+            <circle cx="105" cy="90" r="60" fill="#E8F5E9" stroke="#0B6E4F" strokeWidth="3" opacity="0.9" />
+            <circle cx="195" cy="90" r="60" fill="#FFF8E1" stroke="#FFC107" strokeWidth="3" opacity="0.9" />
+            {/* Minimal labels to avoid truncation */}
+            <text x="85" y="93" textAnchor="middle" fontSize="14" fontWeight="800" fill="#0B6E4F">L</text>
+            <text x="215" y="93" textAnchor="middle" fontSize="14" fontWeight="800" fill="#FFC107">R</text>
+            <text x="150" y="92" textAnchor="middle" fontSize="10" fontWeight="800" fill="#000">SOME</text>
+          </>
+        )}
+        {type === "disjoint" && (
+          <>
+            <circle cx="80" cy="90" r="50" fill="#E8F5E9" stroke="#0B6E4F" strokeWidth="3" />
+            <circle cx="220" cy="90" r="50" fill="#FFEBEE" stroke="#D32F2F" strokeWidth="3" />
+            <text x="80" y="93" textAnchor="middle" fontSize="14" fontWeight="800" fill="#0B6E4F">L</text>
+            <text x="220" y="93" textAnchor="middle" fontSize="14" fontWeight="800" fill="#D32F2F">R</text>
+          </>
         )}
       </svg>
 
-      <div className="mt-1 px-3 py-1 bg-amber-50 border border-amber-200 rounded-full text-[11px] font-semibold text-amber-900 text-center">
-        {scenario.overlap}
+      {/* FULL TEXT LEGEND - Fixes truncation */}
+      <div className="w-full flex flex-col gap-1.5 px-2 py-2 bg-slate-50 rounded-xl border border-slate-200">
+        <div className="flex flex-col gap-2">
+          <div className="flex items-start gap-2">
+            <span className="w-5 h-5 shrink-0 flex items-center justify-center rounded bg-[#E8F5E9] border-2 border-[#0B6E4F] text-[10px] font-bold text-[#0B6E4F] mt-0.5">L</span>
+            <span className="font-bold text-sm text-slate-800 leading-tight">{leftLabel}</span>
+          </div>
+          <div className="flex items-start gap-2">
+            <span className="w-5 h-5 shrink-0 flex items-center justify-center rounded bg-[#FFF8E1] border-2 border-[#FFC107] text-[10px] font-bold text-[#FFC107] mt-0.5">R</span>
+            <span className="font-bold text-sm text-slate-800 leading-tight">{rightLabel}</span>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -2442,9 +2464,9 @@ export default function App() {
           prevLocal.forEach((l) => map.set(l.name.toLowerCase().trim(), l));
           // Overlay cloud records (cross-device authoritative sync)
           cloudRecords.forEach((c) => {
-            const numId = Number(c.id) || Date.now();
+            const finalId = c.id || `cloud-${c.name.toLowerCase().trim()}`;
             map.set(c.name.toLowerCase().trim(), {
-              id: numId,
+              id: finalId,
               name: c.name,
               scores: c.scores || [],
               avg: c.avg || 0,
@@ -2596,13 +2618,14 @@ export default function App() {
           text: q.q,
           answer: q.a,
           explanation: q.exp,
-          hint: `Look at the overlap: "${scenario.overlap}"`,
+          hint: scenario.overlap ? `Look at the overlap: "${scenario.overlap}"` : "Analyze the set relationship carefully.",
           mode: 'venn' as const,
           scenario: {
             id: scenario.id,
             left: scenario.left,
             right: scenario.right,
-            overlap: scenario.overlap
+            overlap: scenario.overlap,
+            type: q.diagramType
           },
           conceptType: getConceptCategory(q.q)
         }))
@@ -2992,8 +3015,8 @@ export default function App() {
         body: JSON.stringify({ count })
       });
       const data = await res.json();
-      const playable: PlayableQuestion[] = data.questions.map((st: any) => ({
-        id: `ai-tf-${Date.now()}-${Math.random()}`,
+      const playable: PlayableQuestion[] = data.questions.map((st: any, i: number) => ({
+        id: `ai-tf-${Date.now()}-${i}-${Math.random()}`,
         text: st.text,
         answer: st.answer,
         explanation: st.explanation,
@@ -3033,19 +3056,20 @@ export default function App() {
         body: JSON.stringify({ count })
       });
       const data = await res.json();
-      const playable: PlayableQuestion[] = data.scenarios.flatMap((scenario: any) =>
+      const playable: PlayableQuestion[] = data.scenarios.flatMap((scenario: any, sIdx: number) =>
         scenario.questions.map((q: any, qIdx: number) => ({
-          id: `ai-venn-${Date.now()}-${Math.random()}-q${qIdx}`,
+          id: `ai-venn-${Date.now()}-${sIdx}-${qIdx}-${Math.random()}`,
           text: q.q,
           answer: q.a,
           explanation: q.exp,
           hint: `Look at the overlap: "${scenario.overlap}"`,
           mode: 'venn' as const,
           scenario: {
-            id: scenario.id || `ai-sc-${Date.now()}`,
+            id: scenario.id || `ai-sc-${Date.now()}-${sIdx}`,
             left: scenario.left,
             right: scenario.right,
-            overlap: scenario.overlap
+            overlap: scenario.overlap,
+            type: q.diagramType || scenario.type || 'overlap'
           },
           conceptType: getConceptCategory(q.q)
         }))
@@ -3123,9 +3147,9 @@ export default function App() {
         body: JSON.stringify({ count })
       });
       const data = await res.json();
-      const playable: PatternItem[] = data.patterns.map((p: any) => ({
+      const playable: PatternItem[] = data.patterns.map((p: any, i: number) => ({
         ...p,
-        id: `ai-pat-${Date.now()}-${Math.random()}`,
+        id: `ai-pat-${Date.now()}-${i}-${Math.random()}`,
         ai: true
       }));
       
@@ -3211,12 +3235,12 @@ export default function App() {
         body: JSON.stringify({ count })
       });
       const data = await res.json();
-      const playable: DecisionScenario[] = data.scenarios.map((sc: any) => ({
-        id: `ai-dec-${Date.now()}-${Math.random()}`,
+      const playable: DecisionScenario[] = data.scenarios.map((sc: any, i: number) => ({
+        id: `ai-dec-${Date.now()}-${i}-${Math.random()}`,
         text: sc.scenario,
-        options: sc.options.map((opt: any) => ({
+        options: sc.options.map((opt: any, oIdx: number) => ({
           ...opt,
-          id: `opt-${Math.random()}`
+          id: `opt-${i}-${oIdx}-${Math.random()}`
         })),
         ai: true
       }));
@@ -3287,8 +3311,8 @@ export default function App() {
         body: JSON.stringify({ count })
       });
       const data = await res.json();
-      const playable: ArgumentItem[] = data.arguments.map((arg: any) => ({
-        id: `ai-arg-${Date.now()}-${Math.random()}`,
+      const playable: ArgumentItem[] = data.arguments.map((arg: any, i: number) => ({
+        id: `ai-arg-${Date.now()}-${i}-${Math.random()}`,
         p1: arg.premise1,
         p2: arg.premise2,
         conc: arg.conclusion,
@@ -3356,8 +3380,8 @@ export default function App() {
         body: JSON.stringify({ count })
       });
       const data = await res.json();
-      const playable: FallacyItem[] = data.fallacies.map((f: any) => ({
-        id: `ai-fal-${Date.now()}-${Math.random()}`,
+      const playable: FallacyItem[] = data.fallacies.map((f: any, i: number) => ({
+        id: `ai-fal-${Date.now()}-${i}-${Math.random()}`,
         text: f.text,
         ans: f.fallacyName,
         exp: f.explanation,
@@ -3480,7 +3504,7 @@ export default function App() {
     setCreateAiGuidance(feedback);
 
     const newQ: CustomQuestion = {
-      id: `custom-${Date.now()}`,
+      id: `custom-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
       text: trimmed,
       answer: createAnswerChoice,
       aiFeedback: feedback,
@@ -3600,7 +3624,7 @@ export default function App() {
         try {
           const chHistory: ChallengeHistoryItem[] = JSON.parse(localStorage.getItem('challengeHistory') || '[]');
           chHistory.push({
-            id: `ch-${Date.now()}`,
+            id: `ch-${Date.now()}-${Math.floor(Math.random() * 1000000)}`,
             date: new Date().toLocaleDateString(),
             battleType: challengeBattleType,
             player1: challengeP1Name,
@@ -4033,7 +4057,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-medium text-slate-800">
-                        {sortedLearners.map((lr) => {
+                        {sortedLearners.map((lr, idx) => {
                           const isStruggling = lr.scores.length > 0 && lr.avg < 50;
                           const lrStreak = getEffectiveStreak(lr);
                           const getAvgByMode = (m: string) => {
@@ -4043,7 +4067,7 @@ export default function App() {
                           };
 
                           return (
-                            <tr key={lr.id} className="hover:bg-slate-50/80">
+                            <tr key={`${lr.id}-${lr.name}-${idx}`} className="hover:bg-slate-50/80">
                               <td className="py-2.5 px-3 font-bold">
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   <span>{lr.name}</span>
@@ -4175,9 +4199,9 @@ export default function App() {
               <div className="pt-3 border-t border-slate-100">
                 <p className="text-xs font-semibold text-slate-500 mb-2">Or select saved learner:</p>
                 <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto">
-                  {allLearners.slice(0, 6).map((lr) => (
+                  {allLearners.slice(0, 6).map((lr, idx) => (
                     <button
-                      key={lr.id}
+                      key={`${lr.id}-${lr.name}-${idx}`}
                       type="button"
                       onClick={() => {
                         setLoginNameInput(lr.name);
@@ -4377,6 +4401,9 @@ export default function App() {
               </div>
             </div>
           </div>
+
+          {/* Global Leaderboard Section */}
+          <GlobalLeaderboard learners={allLearners} />
 
           {/* 3 ROWS (Week 1 L1 L2, Week 2 L3 L4, Week 3 L5 L6 - 140px height, icon 32px, title 18px bold) */}
           <main className="my-2 space-y-2.5">
@@ -5832,11 +5859,20 @@ export default function App() {
 
           <main className="flex-1 flex flex-col justify-center my-2 gap-3">
             {currentQuestion.mode === 'venn' && currentQuestion.scenario && (
-              <div className="flex justify-center">
+              <div className="flex flex-col items-center gap-3">
                 <VennDiagram
-                  scenario={currentQuestion.scenario}
+                  leftLabel={currentQuestion.scenario.left}
+                  rightLabel={currentQuestion.scenario.right}
+                  type={currentQuestion.scenario.type}
                   highlightState={showFeedback ? conceptHighlight : null}
                 />
+                <div className="text-xs font-black text-slate-600 bg-slate-100 px-3 py-1.5 rounded-lg border border-slate-200 uppercase tracking-tight">
+                  Logic: {currentQuestion.scenario.type === "subset" 
+                    ? `ALL ${currentQuestion.scenario.left} are ${currentQuestion.scenario.right}` 
+                    : currentQuestion.scenario.type === "overlap" 
+                    ? `SOME ${currentQuestion.scenario.left} are ${currentQuestion.scenario.right}` 
+                    : `NO ${currentQuestion.scenario.left} are ${currentQuestion.scenario.right}`}
+                </div>
               </div>
             )}
 
@@ -6120,8 +6156,8 @@ export default function App() {
                   </button>
                 </div>
                 <div className="space-y-2 max-h-40 overflow-y-auto">
-                  {savedUserQuestions.map((q) => (
-                    <div key={q.id} className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 text-xs">
+                  {savedUserQuestions.map((q, qIdx) => (
+                    <div key={`${q.id}-${qIdx}`} className="p-2.5 bg-slate-50 rounded-lg border border-slate-100 text-xs">
                       <p className="font-bold text-slate-800">{q.text}</p>
                       <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500">
                         <span>Answer: <strong>{q.answer}</strong></span>
@@ -6884,6 +6920,67 @@ const AiGeneratorHubModal: React.FC<AiGeneratorHubModalProps> = ({
           </button>
         </div>
       </motion.div>
+    </div>
+  );
+};
+
+// ============================================================================
+// GLOBAL LEADERBOARD COMPONENT
+// ============================================================================
+const GlobalLeaderboard: React.FC<{ learners: LearnerProfile[] }> = ({ learners }) => {
+  const topLearners = useMemo(() => {
+    return [...learners]
+      .filter(l => l.avg > 0)
+      .sort((a, b) => b.avg - a.avg)
+      .slice(0, 5);
+  }, [learners]);
+
+  if (topLearners.length === 0) return null;
+
+  return (
+    <div className="my-2 p-3.5 bg-white rounded-2xl shadow-xs border border-slate-200">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-lg bg-amber-100 flex items-center justify-center shadow-xs">
+            <Trophy className="w-4 h-4 text-amber-600" />
+          </div>
+          <div>
+            <h3 className="font-black text-slate-900 text-[13px] uppercase tracking-tight leading-none">Global Leaderboard</h3>
+            <p className="text-[9px] text-slate-400 font-bold uppercase tracking-tighter mt-1">Top logical thinkers</p>
+          </div>
+        </div>
+        <Globe className="w-4 h-4 text-slate-300" />
+      </div>
+      <div className="space-y-1.5">
+        {topLearners.map((l, i) => (
+          <motion.div 
+            initial={{ x: -10, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            transition={{ delay: i * 0.1 }}
+            key={`${l.id}-${l.name}-${i}`} 
+            className="flex items-center justify-between p-2 rounded-xl bg-slate-50/50 border border-slate-100 group hover:bg-white hover:border-amber-200 transition-all shadow-2xs"
+          >
+             <div className="flex items-center gap-3">
+               <div className={`w-6 h-6 flex items-center justify-center rounded-lg text-[10px] font-black ${
+                 i === 0 ? 'bg-amber-500 text-white shadow-sm ring-2 ring-amber-100' : 
+                 i === 1 ? 'bg-slate-400 text-white shadow-xs' :
+                 i === 2 ? 'bg-orange-400 text-white shadow-xs' :
+                 'bg-slate-100 text-slate-500'
+               }`}>
+                 {i === 0 ? '👑' : i + 1}
+               </div>
+               <span className="text-xs font-bold text-slate-800 group-hover:text-slate-950 transition-colors">{l.name}</span>
+             </div>
+             <div className="text-right">
+               <div className="flex items-center gap-1 justify-end">
+                 <span className="text-xs font-black text-emerald-700">{Math.round(l.avg)}%</span>
+                 {i === 0 && <Sparkles className="w-3 h-3 text-amber-400 animate-pulse" />}
+               </div>
+               <span className="block text-[8px] text-slate-400 font-black uppercase tracking-tighter">Avg Score</span>
+             </div>
+          </motion.div>
+        ))}
+      </div>
     </div>
   );
 };
